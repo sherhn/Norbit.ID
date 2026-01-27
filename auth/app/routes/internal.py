@@ -19,7 +19,19 @@ def require_internal_key(f):
     return decorated
 
 
-@bp.route("/validate-session", method=["POST"])
+@bp.route("/validate-session", methods=["POST"])
 @require_internal_key
 def validate_session():
+    pass
+
+
+@bp.route("/get-info", methods=["POST"])
+@require_internal_key
+def get_info():
+    pass
+
+
+@bp.route("/ban", methods=["POST"])
+@require_internal_key
+def ban():
     pass

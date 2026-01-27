@@ -34,7 +34,7 @@ def create_app() -> Flask:
                     SELECT table_name 
                     FROM information_schema.tables 
                     WHERE table_schema = 'public' 
-                    AND table_name IN ('accounts', 'verification_codes', 'user_sessions')
+                    AND table_name IN ('accounts', 'user_sessions')
                 """))
                 existing_tables = [row[0] for row in result]
 
@@ -43,10 +43,6 @@ def create_app() -> Flask:
                 if 'accounts' in existing_tables:
                     db.session.execute(text("SELECT enable_table_audit('accounts')"))
                     app.logger.info("Audit enabled for accounts table")
-
-                if 'verification_codes' in existing_tables:
-                    db.session.execute(text("SELECT enable_table_audit('verification_codes')"))
-                    app.logger.info("Audit enabled for verification_codes table")
 
                 if 'user_sessions' in existing_tables:
                     db.session.execute(text("SELECT enable_table_audit('user_sessions')"))

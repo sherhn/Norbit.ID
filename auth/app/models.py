@@ -1,36 +1,11 @@
-from typing import Any, Optional
+import secrets
+
+import bcrypt
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
-import bcrypt
-import secrets
 from sqlalchemy.orm import deferred
 
 db = SQLAlchemy()
-
-
-class VerificationCode(db.Model):
-    """Модель для хранения хешированных верификационных кодов."""
-
-    __tablename__ = 'verification_codes'
-
-    id = db.Column(db.Integer, primary_key=True)
-    account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False, index=True)
-    operation = db.Column(db.String(32), nullable=False, index=True)
-    code_hash = db.Column(db.String(128), nullable=False)
-    salt = db.Column(db.String(32), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
-    expires_at = db.Column(db.DateTime, nullable=False, index=True)
-    used = db.Column(db.Boolean, default=False, nullable=False)
-    failed_attempts = db.Column(db.Integer, default=0, nullable=False)
-
-    # Связь с аккаунтом
-    account = db.relationship('Account', backref=db.backref('verification_codes', lazy='dynamic'))
-
-    def __init__(self, **kwargs):
-        """Инициализация с явной установкой created_at если не передано."""
-        if 'created_at' not in kwargs:
-            kwargs['created_at'] = datetime.now()
-        super().__init__(**kwargs)
 
 
 class UserSession(db.Model):
@@ -44,8 +19,8 @@ class UserSession(db.Model):
     refresh_token_hash = db.Column(db.String(128), nullable=False)  # Храним как hex строку
     user_agent_hash = db.Column(db.String(128), nullable=False)  # Храним как hex строку
     ip_address = db.Column(db.String(45), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
-    last_used = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.now(), nullable=False, index=True)
+    last_used = db.Column(db.DateTime, default=datetime.now(), nullable=False, index=True)
     expires_at = db.Column(db.DateTime, nullable=False, index=True)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     user_agent_original = db.Column(db.Text, nullable=True)
@@ -92,3 +67,13 @@ class Account(db.Model):
         super().__init__(**kwargs)
         if not self.public_id:
             self.public_id = self._fast_public_id()
+
+    @staticmethod
+    def _fast_public_id() -> str:
+        """Быстрая генерация публичного ID."""
+        return secrets.token_urlsafe(12)[:16]
+
+    def set_password(self, password: str) -> None:
+        """Быстрая установка пароля."""
+        salt = bcrypt.gensalt(rounds=12)
+        self.password_hash = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
