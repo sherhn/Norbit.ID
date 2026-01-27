@@ -25,13 +25,28 @@ def validate_session():
     pass
 
 
-@bp.route("/get-info", methods=["POST"])
+@bp.route("/get-account-info", methods=["POST"])
 @require_internal_key
-def get_info():
+def get_account_info():
     pass
 
 
-@bp.route("/ban", methods=["POST"])
+@bp.route("/get-session-info", methods=["POST"])
 @require_internal_key
-def ban():
+def get_session_info():
+    pass
+
+
+@bp.route("/logout", methods=["POST"])
+def logout():
+    pass
+
+
+@bp.route("/logout-all", methods=["POST"])
+def logout_all():
+    pass
+
+
+@bp.route("/refresh", methods=["POST"])
+def refresh():
     pass
