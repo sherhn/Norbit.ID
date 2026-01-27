@@ -3,7 +3,7 @@ from email_validator import validate_email, EmailNotValidError
 from flask import Blueprint, request, current_app, jsonify
 from ..limiter import limiter
 from ..models import db, Account, UserSession
-
+from ..utils import create_verification_code, validate_password_strength, send_verification_email
 
 bp = Blueprint('public', __name__)
 
@@ -15,7 +15,6 @@ EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 @bp.route("/registration", methods=["POST"])
 @limiter.limit("30 per minute, 100 per hour, 5 per 30 seconds")
 def registration():
-
     try:
         data = request.get_json()
         if not data:
@@ -34,10 +33,9 @@ def registration():
         if not EMAIL_REGEX.match(email):
             return jsonify({"message": "Invalid Email"}, 400)
 
-        if len(password) < 8:
-            return jsonify({"message": "Short Password"}, 400)
-
-        # TODO: Сделать проверку надежности пароля
+        is_valid_password, password_message = validate_password_strength(password)
+        if not is_valid_password:
+            return jsonify({"message": password_message}), 400
 
         try:
             valid = validate_email(email, check_deliverability=False)
@@ -55,18 +53,71 @@ def registration():
 
         try:
             db.session.commit()
+            # После успешного коммита account.id становится доступным
+            current_app.logger.info(f"Account created with ID: {account.id}")
         except Exception as e:
             db.session.rollback()
             current_app.logger.error(f"Registration commit failed: {e}", exc_info=True)
             return jsonify({"message": "Registration Failed"}), 500
 
-        # TODO: Отправка кода подтверждения
+        # Отправка кода подтверждения
+        try:
+            # Создаем и сохраняем код подтверждения в Redis
+            verification_code = create_verification_code(
+                user_id=account.id,
+                operation='register',
+                ttl_minutes=10
+            )
 
-        return jsonify({"message": "Registration Success"}), 201
+            if verification_code:
+                # Попытка отправки кода подтверждения на email
+                email_sent = send_verification_email(
+                    email=email,
+                    code=verification_code,
+                    operation='register'
+                )
+
+                if email_sent:
+                    # Успешная отправка email
+                    current_app.logger.info(
+                        f"Verification code sent to email for user {account.id} ({email})"
+                    )
+
+                    return jsonify({
+                        "message": "Registration Success",
+                        "detail": "Verification code sent to email"
+                    }), 201
+                else:
+                    # Ошибка отправки email
+                    current_app.logger.warning(
+                        f"Failed to send verification email for user {account.id} ({email}). "
+                        f"Code for debugging: {verification_code}"
+                    )
+
+                    return jsonify({
+                        "message": "Registration Success",
+                        "detail": "Account created but verification email could not be sent. Please use resend verification."
+                    }), 201
+            else:
+                current_app.logger.error(f"Failed to create verification code for user {account.id}")
+                # Аккаунт создан, но код не создан
+                return jsonify({
+                    "message": "Registration Success",
+                    "detail": "Account created but verification code could not be generated. Please use resend verification."
+                }), 201
+
+        except Exception as e:
+            current_app.logger.error(f"Failed to send verification code: {e}", exc_info=True)
+            # Аккаунт создан, но произошла ошибка при отправке кода
+            return jsonify({
+                "message": "Registration Success",
+                "detail": "Account created but verification email failed. Please use resend verification."
+            }), 201
 
     except Exception as e:
         current_app.logger.error(f"Unexpected error in register: {e}", exc_info=True)
         return jsonify({"message": "Internal Error"}), 500
+
 
 @bp.route("/login", methods=["POST"])
 @limiter.limit("30 per minute, 100 per hour, 5 per 30 seconds")

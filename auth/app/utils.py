@@ -6,12 +6,48 @@ from datetime import datetime
 from typing import Optional, Tuple
 import redis
 import logging
+import re
+import requests
 from flask import current_app
 
 logger = logging.getLogger(__name__)
 
 # Redis клиент
 redis_client = None
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    """
+    Проверка надежности пароля.
+
+    Args:
+        password: Пароль для проверки
+
+    Returns:
+        Кортеж (is_valid, error_message)
+    """
+    # Минимальная длина
+    if len(password) < 8:
+        return False, "Пароль должен содержать не менее 8 символов"
+
+    # Проверка на наличие цифр
+    if not re.search(r'\d', password):
+        return False, "Пароль должен содержать хотя бы одну цифру"
+
+    # Проверка на наличие заглавной буквы
+    if not re.search(r'[A-ZА-Я]', password):
+        return False, "Пароль должен содержать хотя бы одну заглавную букву"
+
+    # Проверка на наличие строчной буквы
+    if not re.search(r'[a-zа-я]', password):
+        return False, "Пароль должен содержать хотя бы одну строчную букву"
+
+    # Дополнительно: проверка на специальные символы (опционально, но рекомендуется)
+    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]', password):
+        current_app.logger.warning("Пароль не содержит специальных символов")
+        # Не блокируем, только предупреждаем в логах
+
+    return True, "Пароль соответствует требованиям безопасности"
 
 
 def get_redis_client():
@@ -239,4 +275,36 @@ def delete_verification_code(user_id: int, operation: str) -> bool:
 
     except Exception as e:
         logger.error(f"Failed to delete verification code: {e}")
+        return False
+
+
+def send_verification_email(email: str, code: str, operation: str) -> bool:
+    """Отправляет код подтверждения на email.
+
+    Returns:
+        bool: True если успешно, False при ошибке
+    """
+    url = f"{current_app.config['INTERNAL_NOTIFICATION_SERVICE_URL']}/send-verification"
+    payload = {
+        "email": email,
+        "code": code,
+        "operation": operation
+    }
+
+    try:
+        headers = {
+            'X-API-Key': current_app.config['INTERNAL_API_KEY'],
+            'User-Agent': 'AuthService/1.0'
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+
+        result = resp.json()
+        return result.get("status") == "queued"
+
+    except requests.exceptions.RequestException as e:
+        current_app.logger.error(f"Email service request failed: {e}")
+        return False
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error in send_verification_email: {e}")
         return False
