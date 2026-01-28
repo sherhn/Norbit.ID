@@ -617,15 +617,24 @@ def set_session_cookie(response, session_id: str, access_token: str):
     # Сохраняем session_id и access_token в куке
     cookie_value = f"{session_id}:{access_token}"
 
-    response.set_cookie(
-        cookie_name,
-        value=cookie_value,
-        max_age=current_app.config['JWT_REFRESH_TOKEN_EXPIRES'],
-        domain=cookie_domain,
-        secure=secure,
-        httponly=httponly,
-        samesite=samesite
-    )
+    # Параметры для set_cookie
+    cookie_kwargs = {
+        'key': cookie_name,
+        'value': cookie_value,
+        'max_age': current_app.config['JWT_REFRESH_TOKEN_EXPIRES'],
+        'secure': secure,
+        'httponly': httponly,
+        'samesite': samesite,
+        'path': '/'
+    }
+
+    # Добавляем domain только если он указан и не None
+    if cookie_domain and cookie_domain != 'None' and cookie_domain != '':
+        cookie_kwargs['domain'] = cookie_domain
+
+    response.set_cookie(**cookie_kwargs)
+
+    current_app.logger.info(f"Cookie set: {cookie_name}, domain={cookie_domain}")
 
 
 def get_session_from_cookie(request) -> Optional[Dict[str, str]]:
