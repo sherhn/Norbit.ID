@@ -1,5 +1,6 @@
 from functools import wraps
 from flask import Blueprint, request, current_app, jsonify
+from ..utils import get_account_by_public_id
 
 bp = Blueprint('internal', __name__)
 
@@ -28,7 +29,35 @@ def validate_session():
 @bp.route("/get-account-info", methods=["POST"])
 @require_internal_key
 def get_account_info():
-    pass
+    """Получение информации об аккаунте по public_id или email"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        public_id = data.get('public_id')
+        email = data.get('email')
+
+        # Поиск
+        account_info = get_account_by_public_id(public_id=public_id, email=email)
+
+        if account_info:
+            return jsonify({
+                "success": True,
+                "account": account_info
+            }), 200
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Account not found"
+            }), 404
+
+    except ValueError as e:
+        # Ловим ошибку, если не переданы оба параметра
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        current_app.logger.error(f"Error in get_account_info: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @bp.route("/get-session-info", methods=["POST"])

@@ -15,6 +15,7 @@ EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 @bp.route("/registration", methods=["POST"])
 @limiter.limit("30 per minute, 100 per hour, 5 per 30 seconds")
 def registration():
+    """Регистрация"""
     try:
         data = request.get_json()
         if not data:
@@ -134,12 +135,6 @@ def verify():
 @bp.route('/resend-verification', methods=['POST'])
 @limiter.limit("3 per 5 minutes, 10 per hour, 2 per 2 minutes")
 def resend_verification():
-    pass
-
-
-@bp.route("/account", methods=["POST"])
-@limiter.limit("30 per minute, 100 per hour, 5 per 30 seconds")
-def account():
     pass
 
 

@@ -57,10 +57,6 @@ class Account(db.Model):
     locked_until = db.Column(db.DateTime, nullable=True, index=True)
     last_failed_login = db.Column(db.DateTime, nullable=True)
 
-    # Оставленные поля уведомлений
-    email_notifications = db.Column(db.Boolean, default=True, nullable=False)
-    max_sessions = db.Column(db.Integer, default=5, nullable=False)
-
     def __init__(self, **kwargs):
         """Инициализация с оптимизацией."""
         super().__init__(**kwargs)
