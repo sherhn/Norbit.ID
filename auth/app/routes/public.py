@@ -7,7 +7,7 @@ from ..limiter import limiter
 from ..models import db, Account
 from ..utils import create_verification_code, validate_password_strength, send_verification_email, set_session_cookie, \
     create_user_session, create_jwt_tokens, is_session_valid, clear_session_cookie, delete_session_by_id, \
-    delete_all_sessions_by_account_id, get_session_account_id
+    delete_all_sessions_by_account_id, get_session_account_id, get_session_from_cookie
 
 bp = Blueprint('public', __name__)
 
@@ -26,36 +26,18 @@ def require_valid_session_cookie(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         try:
-            # Получаем session_token куку
-            session_cookie = None
+            # Получаем сессию из куки
+            session_data = get_session_from_cookie(request)
 
-            cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
-            if cookie_header:
-                # Парсим куки из заголовка
-                for cookie in cookie_header.split(';'):
-                    cookie = cookie.strip()
-                    if cookie.startswith('session_token='):
-                        session_cookie = cookie[len('session_token='):].strip()
-                        break
-
-            if not session_cookie:
-                current_app.logger.warning("Missing session_token cookie")
+            if not session_data:
+                current_app.logger.warning("Missing or invalid session_token cookie")
                 return jsonify({
                     "message": "Session required",
                     "detail": "Missing session cookie. Please login first."
                 }), 401
 
-            # Извлекаем session_id и access_token из куки
-            # Формат: session_id:access_token
-            parts = session_cookie.split(':', 1)
-            if len(parts) != 2:
-                current_app.logger.warning(f"Invalid session cookie format: {session_cookie[:50]}...")
-                return jsonify({
-                    "message": "Invalid session",
-                    "detail": "Invalid session cookie format"
-                }), 400
-
-            session_id, access_token = parts
+            session_id = session_data['session_id']
+            access_token = session_data['access_token']
 
             # Проверяем сессию
             if not is_session_valid(session_id, access_token):
@@ -65,12 +47,16 @@ def require_valid_session_cookie(f):
                     "detail": "Session is invalid or expired. Please login again."
                 }), 401
 
-            # Сохраняем данные сессии в g
+            # Сохраняем данные сессии и токены в g
             g.session_data = {
                 'session_id': session_id,
                 'access_token': access_token,
-                'session_cookie': session_cookie
+                'session_cookie': f"{session_id}:{access_token}"
             }
+
+            # Сохраняем отдельно токены для удобного доступа
+            g.session_id = session_id
+            g.access_token = access_token
 
             current_app.logger.info(f"Session validated from cookies for: {session_id[:10]}...")
             return f(*args, **kwargs)
@@ -439,36 +425,8 @@ def tfa():
 def logout():
     """Выход из текущей сессии"""
     try:
-        # Получаем session_token из куки
-        session_cookie = None
-
-        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
-        if cookie_header:
-            for cookie in cookie_header.split(';'):
-                cookie = cookie.strip()
-                if cookie.startswith('session_token='):
-                    session_cookie = cookie[len('session_token='):].strip()
-                    break
-
-        if not session_cookie:
-            current_app.logger.warning("No session cookie found for logout")
-            return jsonify({
-                "message": "No active session",
-                "detail": "Already logged out or no session found"
-            }), 200  # Возвращаем 200, т.к. пользователь уже "разлогинен"
-
-        # Извлекаем session_id из куки
-        parts = session_cookie.split(':', 1)
-        if len(parts) != 2:
-            # Кука в неправильном формате, все равно очищаем
-            response = make_response(jsonify({
-                "message": "Session cookie cleared",
-                "detail": "Invalid session cookie format"
-            }), 200)
-            clear_session_cookie(response)
-            return response
-
-        session_id, _ = parts
+        # Получаем session_id из g (уже проверено декоратором)
+        session_id = g.session_id
 
         deleted = delete_session_by_id(session_id)
 
@@ -513,35 +471,8 @@ def logout():
 def logout_all():
     """Выход из всех сессий пользователя"""
     try:
-        # Получаем session_token из куки
-        session_cookie = None
-
-        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
-        if cookie_header:
-            for cookie in cookie_header.split(';'):
-                cookie = cookie.strip()
-                if cookie.startswith('session_token='):
-                    session_cookie = cookie[len('session_token='):].strip()
-                    break
-
-        if not session_cookie:
-            current_app.logger.warning("No session cookie found for logout-all")
-            return jsonify({
-                "message": "No active session",
-                "detail": "Already logged out or no session found"
-            }), 200
-
-        # Извлекаем session_id из куки
-        parts = session_cookie.split(':', 1)
-        if len(parts) != 2:
-            # Кука в неправильном формате
-            response = make_response(jsonify({
-                "message": "Invalid session cookie",
-                "detail": "Cannot determine account from invalid cookie"
-            }), 400)
-            return response
-
-        session_id, _ = parts
+        # Получаем session_id из g (уже проверено декоратором)
+        session_id = g.session_id
 
         # Получаем account_id по session_id
         account_id = get_session_account_id(session_id)
@@ -660,25 +591,8 @@ def reset():
 def delete():
     """Запрос на удаление аккаунта (отправка кода подтверждения)"""
     try:
-        # Получаем account_id из сессии
-        session_cookie = None
-
-        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
-        if cookie_header:
-            for cookie in cookie_header.split(';'):
-                cookie = cookie.strip()
-                if cookie.startswith('session_token='):
-                    session_cookie = cookie[len('session_token='):].strip()
-                    break
-
-        if not session_cookie:
-            return jsonify({"message": "Session required"}), 401
-
-        parts = session_cookie.split(':', 1)
-        if len(parts) != 2:
-            return jsonify({"message": "Invalid session"}), 400
-
-        session_id, _ = parts
+        # Получаем session_id из g (уже проверено декоратором)
+        session_id = g.session_id
 
         # Получаем account_id по session_id
         account_id = get_session_account_id(session_id)
