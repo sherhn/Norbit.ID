@@ -32,9 +32,9 @@ def send_verification():
 
     email = data.get('email')
     code = data.get('code')
-    operation = data.get('operation', 'verify')
+    operation = data.get('operation')
 
-    if not all([email, code]):
+    if not all([email, code, operation]):
         return jsonify({"error": "Missing required fields"}), 400
 
     if len(str(code)) != 6 or not str(code).isdigit():
@@ -45,7 +45,7 @@ def send_verification():
         send_verification_email,
         email, code, operation,
         retries=Config.RQ_RETRY_MAX,
-        retry_intervals=Config.RQ_RETRY_INTERVAL # ВОЗВРАЩЕНО
+        retry_intervals=Config.RQ_RETRY_INTERVAL
     )
 
     return jsonify({

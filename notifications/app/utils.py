@@ -23,9 +23,6 @@ def render_email_template(code: str, operation: str) -> Dict[str, str]:
         elif operation == "reset":
             confirmation_title = "Сброс пароля"
             operation_description = "сброса пароля"
-        elif operation == "verify":
-            confirmation_title = "Подтверждение входа"
-            operation_description = "подверждения входа"
         elif operation == "delete":
             confirmation_title = "Подтверждение удаления"
             operation_description = "подтверждения удаления аккаунта"
@@ -62,8 +59,6 @@ def render_email_template(code: str, operation: str) -> Dict[str, str]:
             subject = f"Код для входа: {code}"
         elif operation == "reset":
             subject = f"Код для сброса пароля: {code}"
-        elif operation == "verify":
-            subject = f"Код подтверждения входа: {code}"
         elif operation == "delete":
             subject = f"Код подтверждения удаления аккаунта: {code}"
         else:

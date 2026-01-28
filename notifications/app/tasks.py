@@ -5,7 +5,7 @@ from email.utils import formataddr
 from flask import current_app
 from .utils import render_email_template
 
-def send_verification_email(email: str, code: str, operation: str = 'verify', **kwargs):
+def send_verification_email(email: str, code: str, operation: str, **kwargs):
     """
     Отправляет email для верификации.
     **kwargs добавлено для совместимости с метаданными RQ (например, retries, retry_intervals).
