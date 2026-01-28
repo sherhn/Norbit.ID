@@ -25,44 +25,25 @@ def require_internal_key(f):
 def validate_session():
     """Валидация сессии пользователя"""
     try:
-        # Получаем куки из заголовка Cookie
-        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
-
-        if not cookie_header:
-            current_app.logger.warning("Cookie header not found in request")
+        # Получаем данные из JSON
+        data = request.get_json()
+        if not data:
+            current_app.logger.warning("No JSON data provided")
             return jsonify({
                 "valid": False,
-                "error": "Cookie header not found in request"
+                "error": "No JSON data provided"
             }), 400
 
-        # Находим нашу сессионную куку в строке кук
-        session_cookie_name = current_app.config['SESSION_COOKIE_NAME']
-        session_cookie = None
+        # Извлекаем session_id и access_token из JSON
+        session_id = data.get('session_id')
+        access_token = data.get('access_token')
 
-        # Парсим куки из заголовка
-        for cookie in cookie_header.split(';'):
-            cookie = cookie.strip()
-            if cookie.startswith(f'{session_cookie_name}='):
-                session_cookie = cookie[len(session_cookie_name) + 1:].strip()
-                break
-
-        if not session_cookie:
-            current_app.logger.warning(f"Session cookie '{session_cookie_name}' not found in header")
+        if not session_id or not access_token:
+            current_app.logger.warning("Missing session_id or access_token in JSON")
             return jsonify({
                 "valid": False,
-                "error": f"Session cookie '{session_cookie_name}' not found"
+                "error": "Missing session_id or access_token in JSON data"
             }), 400
-
-        # Извлекаем session_id и access_token из куки
-        parts = session_cookie.split(':', 1)
-        if len(parts) != 2:
-            current_app.logger.warning(f"Invalid session cookie format: {session_cookie[:50]}...")
-            return jsonify({
-                "valid": False,
-                "error": "Invalid session cookie format"
-            }), 400
-
-        session_id, access_token = parts
 
         # Проверяем сессию
         from ..utils import is_session_valid
