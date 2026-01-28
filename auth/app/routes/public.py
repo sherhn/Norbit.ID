@@ -1,18 +1,87 @@
 import re
 from datetime import datetime, timedelta
-
+from functools import wraps
 from email_validator import validate_email, EmailNotValidError
-from flask import Blueprint, request, current_app, jsonify, make_response
+from flask import Blueprint, request, current_app, jsonify, make_response, g
 from ..limiter import limiter
 from ..models import db, Account
 from ..utils import create_verification_code, validate_password_strength, send_verification_email, set_session_cookie, \
-    create_user_session, create_jwt_tokens
+    create_user_session, create_jwt_tokens, is_session_valid
 
 bp = Blueprint('public', __name__)
 
 # Проверки никнейма и почты
 USERNAME_REGEX = re.compile(r'^[\w-]{3,12}$', re.UNICODE)
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+
+
+def require_valid_session_cookie(f):
+    """
+    Декоратор для проверки валидности сессии через куки.
+    Ожидает куку 'session_token' в формате: session_id:access_token
+    Для публичных эндпоинтов.
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        try:
+            # Получаем session_token куку
+            session_cookie = None
+
+            cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
+            if cookie_header:
+                # Парсим куки из заголовка
+                for cookie in cookie_header.split(';'):
+                    cookie = cookie.strip()
+                    if cookie.startswith('session_token='):
+                        session_cookie = cookie[len('session_token='):].strip()
+                        break
+
+            if not session_cookie:
+                current_app.logger.warning("Missing session_token cookie")
+                return jsonify({
+                    "message": "Session required",
+                    "detail": "Missing session cookie. Please login first."
+                }), 401
+
+            # Извлекаем session_id и access_token из куки
+            # Формат: session_id:access_token
+            parts = session_cookie.split(':', 1)
+            if len(parts) != 2:
+                current_app.logger.warning(f"Invalid session cookie format: {session_cookie[:50]}...")
+                return jsonify({
+                    "message": "Invalid session",
+                    "detail": "Invalid session cookie format"
+                }), 400
+
+            session_id, access_token = parts
+
+            # Проверяем сессию
+            if not is_session_valid(session_id, access_token):
+                current_app.logger.info(f"Invalid session from cookies: {session_id[:10]}...")
+                return jsonify({
+                    "message": "Invalid session",
+                    "detail": "Session is invalid or expired. Please login again."
+                }), 401
+
+            # Сохраняем данные сессии в g
+            g.session_data = {
+                'session_id': session_id,
+                'access_token': access_token,
+                'session_cookie': session_cookie
+            }
+
+            current_app.logger.info(f"Session validated from cookies for: {session_id[:10]}...")
+            return f(*args, **kwargs)
+
+        except Exception as e:
+            current_app.logger.error(f"Error validating session from cookies: {e}", exc_info=True)
+            return jsonify({
+                "message": "Session validation failed",
+                "detail": "Internal server error during session validation"
+            }), 500
+
+    return decorated
 
 
 @bp.route("/registration", methods=["POST"])
@@ -301,6 +370,7 @@ def login():
 
 @bp.route("/verify", methods=["POST"])
 @limiter.limit("5 per 2 minutes, 20 per hour, 3 per minute")
+@require_valid_session_cookie
 def verify():
     pass
 
