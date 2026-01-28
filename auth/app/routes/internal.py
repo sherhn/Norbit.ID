@@ -222,6 +222,13 @@ def get_session_info():
     pass
 
 
+@bp.route("/get-all-session-info", methods=["POST"])
+@require_internal_token
+@require_valid_session
+def get_all_session_info():
+    pass
+
+
 @bp.route("/logout", methods=["POST"])
 @require_internal_token
 @require_valid_session
@@ -233,4 +240,11 @@ def logout():
 @require_internal_token
 @require_valid_session
 def logout_all():
+    pass
+
+
+@bp.route("/ban", methods=["POST"])
+@require_internal_token
+@require_valid_session
+def ban():
     pass
