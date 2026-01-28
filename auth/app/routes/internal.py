@@ -94,7 +94,7 @@ def require_valid_session(f):
 @bp.route("/get-service-token", methods=["POST"])
 def get_service_token():
     """
-    Получение токена для сервиса.\
+    Получение токена для сервиса.
     """
     try:
         # Получаем данные для создания токена
@@ -112,8 +112,7 @@ def get_service_token():
         from ..utils import create_service_token
         token_info = create_service_token(
             service_name=service_name,
-            description=description,
-            valid_days=180
+            description=description
         )
 
         if not token_info:
@@ -127,6 +126,7 @@ def get_service_token():
             "token": token_info['token'],
             "service_name": token_info['service_name'],
             "expires_at": token_info['expires_at'],
+            "valid_days": token_info['valid_days'],
             "warning": "Save this token securely. It will not be shown again."
         }), 200
 

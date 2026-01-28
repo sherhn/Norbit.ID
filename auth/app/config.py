@@ -17,6 +17,9 @@ class Config:
     JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 900))  # 15 минут
     JWT_REFRESH_TOKEN_EXPIRES = int(os.environ.get('JWT_REFRESH_TOKEN_EXPIRES', 2592000))  # 30 дней
 
+    # Срок жизни сервисного токена
+    SERVICE_TOKEN_EXPIRES_DAYS = int(os.environ.get('SERVICE_TOKEN_EXPIRES_DAYS', 180))
+
     # Настройки сессий
     MAX_SESSIONS_PER_USER = int(os.environ.get('MAX_SESSIONS_PER_USER', 10))
     SESSION_COOKIE_NAME = 'session_token'

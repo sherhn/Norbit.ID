@@ -46,20 +46,22 @@ def hash_service_token(token: str) -> str:
     return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
 
-def create_service_token(service_name: str, description: str = None,
-                         valid_days: int = 180) -> Optional[Dict[str, Any]]:
+def create_service_token(service_name: str, description: str = None) -> Optional[Dict[str, Any]]:
     """
     Создание токена для сервиса.
 
     Args:
         service_name: Название сервиса
         description: Описание токена (опционально)
-        valid_days: Срок действия в днях
 
     Returns:
         Словарь с токеном и информацией или None при ошибке
     """
     try:
+        from flask import current_app
+
+        valid_days = int(current_app.config.get('SERVICE_TOKEN_EXPIRES_DAYS', 180))
+
         # Генерируем токен
         token = generate_service_token()
         token_hash = hash_service_token(token)
