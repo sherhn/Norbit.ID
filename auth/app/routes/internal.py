@@ -234,9 +234,3 @@ def logout():
 @require_valid_session
 def logout_all():
     pass
-
-
-@bp.route("/refresh", methods=["POST"])
-@require_internal_token
-def refresh():
-    pass

@@ -6,7 +6,8 @@ from flask import Blueprint, request, current_app, jsonify, make_response, g
 from ..limiter import limiter
 from ..models import db, Account
 from ..utils import create_verification_code, validate_password_strength, send_verification_email, set_session_cookie, \
-    create_user_session, create_jwt_tokens, is_session_valid
+    create_user_session, create_jwt_tokens, is_session_valid, clear_session_cookie, delete_session_by_id, \
+    delete_all_sessions_by_account_id, get_session_account_id
 
 bp = Blueprint('public', __name__)
 
@@ -383,14 +384,165 @@ def resend_verification():
 
 @bp.route("/logout", methods=["POST"])
 @limiter.limit("20 per minute, 50 per hour")
+@require_valid_session_cookie
 def logout():
-    pass
+    """Выход из текущей сессии"""
+    try:
+        # Получаем session_token из куки
+        session_cookie = None
+
+        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
+        if cookie_header:
+            for cookie in cookie_header.split(';'):
+                cookie = cookie.strip()
+                if cookie.startswith('session_token='):
+                    session_cookie = cookie[len('session_token='):].strip()
+                    break
+
+        if not session_cookie:
+            current_app.logger.warning("No session cookie found for logout")
+            return jsonify({
+                "message": "No active session",
+                "detail": "Already logged out or no session found"
+            }), 200  # Возвращаем 200, т.к. пользователь уже "разлогинен"
+
+        # Извлекаем session_id из куки
+        parts = session_cookie.split(':', 1)
+        if len(parts) != 2:
+            # Кука в неправильном формате, все равно очищаем
+            response = make_response(jsonify({
+                "message": "Session cookie cleared",
+                "detail": "Invalid session cookie format"
+            }), 200)
+            clear_session_cookie(response)
+            return response
+
+        session_id, _ = parts
+
+        deleted = delete_session_by_id(session_id)
+
+        if deleted:
+            current_app.logger.info(f"Session {session_id[:10]}... deleted from DB")
+        else:
+            current_app.logger.warning(f"Session {session_id[:10]}... not found in DB")
+
+        # Создаем ответ и очищаем куку
+        response = make_response(jsonify({
+            "message": "Logged out successfully",
+            "detail": "Session terminated and cookie cleared",
+            "session_deleted": deleted
+        }), 200)
+
+        # Очищаем сессионную куку
+        clear_session_cookie(response)
+
+        return response
+
+    except Exception as e:
+        current_app.logger.error(f"Error during logout: {e}", exc_info=True)
+
+        # Все равно пытаемся очистить куку
+        response = make_response(jsonify({
+            "message": "Logout attempted",
+            "detail": "Error occurred but cookie cleared",
+            "error": str(e)
+        }), 200)
+
+        try:
+            clear_session_cookie(response)
+        except:
+            pass
+
+        return response
 
 
 @bp.route("/logout-all", methods=["POST"])
 @limiter.limit("5 per minute, 10 per hour")
+@require_valid_session_cookie
 def logout_all():
-    pass
+    """Выход из всех сессий пользователя"""
+    try:
+        # Получаем session_token из куки
+        session_cookie = None
+
+        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
+        if cookie_header:
+            for cookie in cookie_header.split(';'):
+                cookie = cookie.strip()
+                if cookie.startswith('session_token='):
+                    session_cookie = cookie[len('session_token='):].strip()
+                    break
+
+        if not session_cookie:
+            current_app.logger.warning("No session cookie found for logout-all")
+            return jsonify({
+                "message": "No active session",
+                "detail": "Already logged out or no session found"
+            }), 200
+
+        # Извлекаем session_id из куки
+        parts = session_cookie.split(':', 1)
+        if len(parts) != 2:
+            # Кука в неправильном формате
+            response = make_response(jsonify({
+                "message": "Invalid session cookie",
+                "detail": "Cannot determine account from invalid cookie"
+            }), 400)
+            return response
+
+        session_id, _ = parts
+
+        # Получаем account_id по session_id
+        account_id = get_session_account_id(session_id)
+
+        if not account_id:
+            current_app.logger.warning(f"Cannot find account for session: {session_id[:10]}...")
+
+            # Все равно очищаем куку
+            response = make_response(jsonify({
+                "message": "Session cookie cleared",
+                "detail": "Account not found for session"
+            }), 200)
+            clear_session_cookie(response)
+            return response
+
+        # Удаляем все сессии аккаунта из БД
+        deleted = delete_all_sessions_by_account_id(account_id)
+
+        if deleted:
+            current_app.logger.info(f"All sessions deleted for account: {account_id}")
+        else:
+            current_app.logger.warning(f"No sessions found or error deleting for account: {account_id}")
+
+        # Создаем ответ и очищаем куку
+        response = make_response(jsonify({
+            "message": "Logged out from all devices",
+            "detail": "All sessions terminated and cookie cleared",
+            "account_id": account_id,
+            "all_sessions_deleted": deleted
+        }), 200)
+
+        # Очищаем сессионную куку
+        clear_session_cookie(response)
+
+        return response
+
+    except Exception as e:
+        current_app.logger.error(f"Error during logout-all: {e}", exc_info=True)
+
+        # Все равно пытаемся очистить куку
+        response = make_response(jsonify({
+            "message": "Logout-all attempted",
+            "detail": "Error occurred but cookie cleared",
+            "error": str(e)
+        }), 200)
+
+        try:
+            clear_session_cookie(response)
+        except:
+            pass
+
+        return response
 
 
 @bp.route("/reset", methods=["POST"])

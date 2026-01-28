@@ -894,3 +894,125 @@ def is_session_valid(session_id: str, access_token: str) -> bool:
     except Exception as e:
         logger.error(f"Error validating session {session_id[:10]}...: {e}")
         return False
+
+
+def delete_session_by_id(session_id: str) -> bool:
+    """
+    Полное удаление сессии из БД по ID.
+
+    Args:
+        session_id: ID сессии для удаления
+
+    Returns:
+        True если удалено, иначе False
+    """
+    try:
+        from .models import db, UserSession
+
+        # Находим сессию
+        session = UserSession.query.filter_by(session_id=session_id).first()
+
+        if not session:
+            logger.warning(f"Session not found for deletion: {session_id}")
+            return False
+
+        # Полностью удаляем сессию из БД
+        db.session.delete(session)
+        db.session.commit()
+
+        logger.info(f"Session deleted from DB: {session_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting session {session_id}: {e}", exc_info=True)
+        db.session.rollback()
+        return False
+
+
+def delete_all_sessions_by_account_id(account_id: int) -> bool:
+    """
+    Полное удаление всех сессий аккаунта из БД.
+
+    Args:
+        account_id: ID аккаунта
+
+    Returns:
+        True если удалено, иначе False
+    """
+    try:
+        from .models import db, UserSession
+
+        # Находим все сессии аккаунта
+        sessions = UserSession.query.filter_by(account_id=account_id).all()
+
+        if not sessions:
+            logger.warning(f"No sessions found for account: {account_id}")
+            return True
+
+        # Удаляем все сессии
+        for session in sessions:
+            db.session.delete(session)
+
+        db.session.commit()
+
+        logger.info(f"All {len(sessions)} sessions deleted for account: {account_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting all sessions for account {account_id}: {e}", exc_info=True)
+        db.session.rollback()
+        return False
+
+
+def get_session_account_id(session_id: str) -> Optional[int]:
+    """
+    Получение ID аккаунта по session_id.
+
+    Args:
+        session_id: ID сессии
+
+    Returns:
+        ID аккаунта или None если сессия не найдена
+    """
+    try:
+        from .models import UserSession
+
+        session = UserSession.query.filter_by(session_id=session_id).first()
+
+        if not session:
+            logger.warning(f"Session not found: {session_id}")
+            return None
+
+        return session.account_id
+
+    except Exception as e:
+        logger.error(f"Error getting account_id for session {session_id}: {e}")
+        return None
+
+
+def clear_session_cookie(response):
+    """
+    Очистка сессионной куки.
+    """
+    from flask import current_app
+
+    cookie_name = current_app.config['SESSION_COOKIE_NAME']
+    cookie_domain = current_app.config['SESSION_COOKIE_DOMAIN']
+
+    # Параметры для удаления куки
+    cookie_kwargs = {
+        'key': cookie_name,
+        'value': '',
+        'expires': 0,
+        'max_age': 0,
+        'path': '/'
+    }
+
+    # Добавляем domain только если он указан
+    if cookie_domain and cookie_domain != 'None' and cookie_domain != '':
+        cookie_kwargs['domain'] = cookie_domain
+
+    # Удаляем куку
+    response.set_cookie(**cookie_kwargs)
+
+    current_app.logger.info(f"Session cookie cleared: {cookie_name}")
