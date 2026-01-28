@@ -670,65 +670,6 @@ def create_user_session(account_id: int, refresh_token: str, user_agent: str) ->
         return None
 
 
-def verify_session(session_id: str, refresh_token: str, user_agent: str) -> Optional[Dict[str, Any]]:
-    """
-    Проверка сессии пользователя.
-
-    Args:
-        session_id: ID сессии
-        refresh_token: Refresh токен
-        user_agent: User-Agent браузера
-
-    Returns:
-        Информация о сессии или None если сессия невалидна
-    """
-    try:
-        from .models import UserSession
-
-        session = UserSession.query.filter_by(
-            session_id=session_id,
-            is_active=True
-        ).first()
-
-        if not session:
-            logger.warning(f"Session not found: {session_id}")
-            return None
-
-        # Проверяем срок действия
-        if datetime.now() > session.expires_at:
-            session.is_active = False
-            db.session.commit()
-            logger.info(f"Session expired: {session_id}")
-            return None
-
-        # Проверяем refresh токен
-        refresh_token_hash = hash_string(refresh_token)
-        if refresh_token_hash != session.refresh_token_hash:
-            logger.warning(f"Invalid refresh token for session: {session_id}")
-            return None
-
-        # Проверяем user-agent
-        user_agent_hash = hash_string(user_agent)
-        if user_agent_hash != session.user_agent_hash:
-            logger.warning(f"User-Agent mismatch for session: {session_id}")
-            return None
-
-        # Обновляем время последнего использования
-        session.last_used = datetime.now()
-        db.session.commit()
-
-        return {
-            'account_id': session.account_id,
-            'session_id': session_id,
-            'created_at': session.created_at,
-            'last_used': session.last_used
-        }
-
-    except Exception as e:
-        logger.error(f"Error verifying session: {e}", exc_info=True)
-        return None
-
-
 def set_session_cookie(response, session_id: str, access_token: str):
     """
     Установка сессионной куки.
@@ -795,50 +736,6 @@ def get_session_from_cookie(request) -> Optional[Dict[str, str]]:
         'session_id': parts[0],
         'access_token': parts[1]
     }
-
-
-def invalidate_session(session_id: str):
-    """
-    Инвалидация сессии.
-
-    Args:
-        session_id: ID сессии для инвалидации
-    """
-    try:
-        from .models import db, UserSession
-
-        session = UserSession.query.filter_by(session_id=session_id).first()
-        if session:
-            session.is_active = False
-            db.session.commit()
-            logger.info(f"Session invalidated: {session_id}")
-
-    except Exception as e:
-        logger.error(f"Error invalidating session: {e}", exc_info=True)
-        db.session.rollback()
-
-
-def invalidate_all_sessions(account_id: int):
-    """
-    Инвалидация всех сессий пользователя.
-
-    Args:
-        account_id: ID аккаунта
-    """
-    try:
-        from .models import db, UserSession
-
-        UserSession.query.filter_by(
-            account_id=account_id,
-            is_active=True
-        ).update({'is_active': False})
-
-        db.session.commit()
-        logger.info(f"All sessions invalidated for account: {account_id}")
-
-    except Exception as e:
-        logger.error(f"Error invalidating all sessions: {e}", exc_info=True)
-        db.session.rollback()
 
 
 def is_session_valid(session_id: str, access_token: str) -> bool:
