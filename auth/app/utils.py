@@ -707,3 +707,58 @@ def invalidate_all_sessions(account_id: int):
     except Exception as e:
         logger.error(f"Error invalidating all sessions: {e}", exc_info=True)
         db.session.rollback()
+
+
+def is_session_valid(session_id: str, access_token: str) -> bool:
+    """
+    Проверка валидности сессии.
+
+    Args:
+        session_id: ID сессии
+        access_token: Access токен
+
+    Returns:
+        True если сессия валидна, иначе False
+    """
+    try:
+        from .models import UserSession
+
+        # Находим сессию
+        session = UserSession.query.filter_by(
+            session_id=session_id,
+            is_active=True
+        ).first()
+
+        if not session:
+            logger.debug(f"Session not found or inactive: {session_id}")
+            return False
+
+        # Проверяем срок действия
+        if datetime.now() > session.expires_at:
+            logger.debug(f"Session expired: {session_id}")
+            # Помечаем как неактивную
+            session.is_active = False
+            db.session.commit()
+            return False
+
+        # Проверяем access токен
+        token_payload = verify_jwt_token(access_token, token_type='access')
+        if not token_payload:
+            logger.debug(f"Invalid access token for session: {session_id}")
+            return False
+
+        # Проверяем что токен принадлежит владельцу сессии
+        if token_payload.get('account_id') != session.account_id:
+            logger.debug(f"Token account_id mismatch for session: {session_id}")
+            return False
+
+        # Обновляем время последнего использования
+        session.last_used = datetime.now()
+        db.session.commit()
+
+        logger.debug(f"Session validated: {session_id[:10]}...")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error validating session {session_id[:10]}...: {e}")
+        return False

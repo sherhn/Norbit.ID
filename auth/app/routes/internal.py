@@ -20,10 +20,67 @@ def require_internal_key(f):
     return decorated
 
 
-@bp.route("/validate-session", methods=["POST"])
+@bp.route("/validate-session", methods=["GET"])
 @require_internal_key
 def validate_session():
-    pass
+    """Валидация сессии пользователя"""
+    try:
+        # Получаем куки из заголовка Cookie
+        cookie_header = request.headers.get('Cookie') or request.headers.get('cookie')
+
+        if not cookie_header:
+            current_app.logger.warning("Cookie header not found in request")
+            return jsonify({
+                "valid": False,
+                "error": "Cookie header not found in request"
+            }), 400
+
+        # Находим нашу сессионную куку в строке кук
+        session_cookie_name = current_app.config['SESSION_COOKIE_NAME']
+        session_cookie = None
+
+        # Парсим куки из заголовка
+        for cookie in cookie_header.split(';'):
+            cookie = cookie.strip()
+            if cookie.startswith(f'{session_cookie_name}='):
+                session_cookie = cookie[len(session_cookie_name) + 1:].strip()
+                break
+
+        if not session_cookie:
+            current_app.logger.warning(f"Session cookie '{session_cookie_name}' not found in header")
+            return jsonify({
+                "valid": False,
+                "error": f"Session cookie '{session_cookie_name}' not found"
+            }), 400
+
+        # Извлекаем session_id и access_token из куки
+        parts = session_cookie.split(':', 1)
+        if len(parts) != 2:
+            current_app.logger.warning(f"Invalid session cookie format: {session_cookie[:50]}...")
+            return jsonify({
+                "valid": False,
+                "error": "Invalid session cookie format"
+            }), 400
+
+        session_id, access_token = parts
+
+        # Проверяем сессию
+        from ..utils import is_session_valid
+        is_valid = is_session_valid(session_id, access_token)
+
+        current_app.logger.info(f"Session validation for {session_id[:10]}...: {is_valid}")
+
+        return jsonify({
+            "valid": is_valid,
+            "session_id": session_id if len(session_id) < 20 else session_id[:20] + '...'
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error validating session: {e}", exc_info=True)
+        return jsonify({
+            "valid": False,
+            "error": str(e)
+        }), 500
 
 
 @bp.route("/get-account-info", methods=["POST"])
