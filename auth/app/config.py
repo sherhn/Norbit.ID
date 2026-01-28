@@ -11,3 +11,16 @@ class Config:
 
     # Коды подтверждения
     REDIS_CODES_URL = os.environ.get('REDIS_CODES_URL')
+
+    # JWT настройки
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY')
+    JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 900))  # 15 минут
+    JWT_REFRESH_TOKEN_EXPIRES = int(os.environ.get('JWT_REFRESH_TOKEN_EXPIRES', 2592000))  # 30 дней
+
+    # Настройки сессий
+    MAX_SESSIONS_PER_USER = int(os.environ.get('MAX_SESSIONS_PER_USER', 10))
+    SESSION_COOKIE_NAME = 'session_token'
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'True').lower() == 'true'
+    SESSION_COOKIE_SAMESITE = 'Lax'  # Для кросс-доменных запросов
+    SESSION_COOKIE_DOMAIN = os.environ.get('SESSION_COOKIE_DOMAIN', None)  # Для кросс-доменных сессий

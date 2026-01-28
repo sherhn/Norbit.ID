@@ -1,5 +1,4 @@
 import secrets
-
 import bcrypt
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
@@ -72,3 +71,13 @@ class Account(db.Model):
         """Быстрая установка пароля."""
         salt = bcrypt.gensalt(rounds=12)
         self.password_hash = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+    def check_password(self, password: str) -> bool:
+        """Проверка пароля."""
+        try:
+            return bcrypt.checkpw(
+                password.encode('utf-8'),
+                self.password_hash.encode('utf-8')
+            )
+        except Exception:
+            return False

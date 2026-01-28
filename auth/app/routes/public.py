@@ -1,9 +1,12 @@
 import re
+from datetime import datetime, timedelta
+
 from email_validator import validate_email, EmailNotValidError
-from flask import Blueprint, request, current_app, jsonify
+from flask import Blueprint, request, current_app, jsonify, make_response
 from ..limiter import limiter
-from ..models import db, Account, UserSession
-from ..utils import create_verification_code, validate_password_strength, send_verification_email
+from ..models import db, Account
+from ..utils import create_verification_code, validate_password_strength, send_verification_email, set_session_cookie, \
+    create_user_session, create_jwt_tokens
 
 bp = Blueprint('public', __name__)
 
@@ -123,7 +126,177 @@ def registration():
 @bp.route("/login", methods=["POST"])
 @limiter.limit("30 per minute, 100 per hour, 5 per 30 seconds")
 def login():
-    pass
+    """Аутентификация пользователя"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"message": "No data"}), 400
+
+        email = data.get("email")
+        password = data.get("password")
+
+        if not email or not password:
+            return jsonify({"message": "Missing email or password"}), 400
+
+        # Находим аккаунт
+        account = Account.query.filter_by(email=email).first()
+        if not account:
+            # Возвращаем ту же ошибку для безопасности
+            current_app.logger.warning(f"Login attempt for non-existent email: {email}")
+            return jsonify({"message": "Invalid credentials"}), 401
+
+        # Проверяем блокировку
+        if account.locked_until and account.locked_until > datetime.now():
+            lock_time_remaining = (account.locked_until - datetime.now()).seconds
+            current_app.logger.warning(f"Account locked for {account.email}, time remaining: {lock_time_remaining}s")
+            return jsonify({
+                "message": "Account is temporarily locked",
+                "retry_after": lock_time_remaining
+            }), 423
+
+        # Проверяем пароль
+        if not account.check_password(password):
+            # Увеличиваем счетчик неудачных попыток
+            account.failed_login_attempts += 1
+            account.last_failed_login = datetime.now()
+
+            # Блокируем аккаунт после 5 неудачных попыток
+            if account.failed_login_attempts >= 5:
+                account.locked_until = datetime.now() + timedelta(minutes=15)
+                current_app.logger.warning(f"Account locked due to multiple failed attempts: {account.email}")
+
+            db.session.commit()
+
+            current_app.logger.warning(f"Failed login attempt for {account.email}")
+            return jsonify({"message": "Invalid credentials"}), 401
+
+        # Сбрасываем счетчик неудачных попыток при успешном входе
+        account.failed_login_attempts = 0
+        account.locked_until = None
+        db.session.commit()
+
+        # Получаем User-Agent
+        user_agent = request.headers.get('User-Agent', '')
+
+        # Проверяем, нужна ли верификация
+        if not account.is_verified:
+            # Отправляем код верификации для подтверждения email
+            current_app.logger.info(f"Account not verified, sending code for: {account.email}")
+
+            verification_code = create_verification_code(
+                user_id=account.id,
+                operation='login_verify_email',
+                ttl_minutes=10
+            )
+
+            if verification_code:
+                email_sent = send_verification_email(
+                    email=account.email,
+                    code=verification_code,
+                    operation='login_verify_email'
+                )
+
+                if email_sent:
+                    return jsonify({
+                        "message": "Account not verified",
+                        "detail": "Verification code sent to email",
+                        "requires_verification": True,
+                        "verification_type": "email"
+                    }), 200
+                else:
+                    return jsonify({
+                        "message": "Account not verified",
+                        "detail": "Failed to send verification email. Please try again.",
+                        "requires_verification": True,
+                        "verification_type": "email"
+                    }), 200
+            else:
+                return jsonify({
+                    "message": "Account not verified",
+                    "detail": "Failed to generate verification code",
+                    "requires_verification": True,
+                    "verification_type": "email"
+                }), 200
+
+        # Проверяем двухфакторную аутентификацию
+        if account.two_factor_enabled:
+            # Отправляем код 2FA
+            current_app.logger.info(f"2FA required for: {account.email}")
+
+            verification_code = create_verification_code(
+                user_id=account.id,
+                operation='two_factor_auth',
+                ttl_minutes=5
+            )
+
+            if verification_code:
+                email_sent = send_verification_email(
+                    email=account.email,
+                    code=verification_code,
+                    operation='two_factor_auth'
+                )
+
+                if email_sent:
+                    return jsonify({
+                        "message": "Two-factor authentication required",
+                        "detail": "Verification code sent to email",
+                        "requires_verification": True,
+                        "verification_type": "two_factor"
+                    }), 200
+                else:
+                    return jsonify({
+                        "message": "Two-factor authentication required",
+                        "detail": "Failed to send verification code. Please try again.",
+                        "requires_verification": True,
+                        "verification_type": "two_factor"
+                    }), 200
+            else:
+                return jsonify({
+                    "message": "Two-factor authentication required",
+                    "detail": "Failed to generate verification code",
+                    "requires_verification": True,
+                    "verification_type": "two_factor"
+                }), 200
+
+        # Если все проверки пройдены - создаем сессию
+        tokens = create_jwt_tokens(account.id, account.public_id)
+
+        session_info = create_user_session(
+            account_id=account.id,
+            refresh_token=tokens['refresh_token'],
+            user_agent=user_agent
+        )
+
+        if not session_info:
+            return jsonify({"message": "Failed to create session"}), 500
+
+        # Создаем ответ и устанавливаем куки
+        response_data = {
+            "message": "Login successful",
+            "account": {
+                "username": account.username,
+                "email": account.email,
+                "public_id": account.public_id,
+                "is_verified": account.is_verified
+            },
+            "session": {
+                "session_id": session_info['session_id'],
+                "created_at": session_info['created_at'].isoformat(),
+                "expires_at": session_info['expires_at'].isoformat()
+            }
+        }
+
+        response = make_response(jsonify(response_data), 200)
+
+        # Устанавливаем сессионную куку
+        set_session_cookie(response, session_info['session_id'], tokens['access_token'])
+
+        current_app.logger.info(f"Successful login for: {account.email}")
+        return response
+
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error in login: {e}", exc_info=True)
+        return jsonify({"message": "Internal error"}), 500
 
 
 @bp.route("/verify", methods=["POST"])

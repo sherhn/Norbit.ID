@@ -2,14 +2,16 @@ import secrets
 import string
 import bcrypt
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 import redis
 import logging
 import re
 import requests
 from flask import current_app
-from .models import Account
+from .models import Account, db
+import jwt
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -365,3 +367,334 @@ def get_account_by_public_id(public_id: str = None, email: str = None) -> Option
     except Exception as e:
         logger.error(f"Error retrieving account. public_id: {public_id}, email: {email}: {e}", exc_info=True)
         return None
+
+
+def create_jwt_tokens(account_id: int, public_id: str) -> Dict[str, str]:
+    """
+    Создание JWT токенов (access и refresh).
+
+    Args:
+        account_id: ID аккаунта в БД
+        public_id: Публичный ID аккаунта
+
+    Returns:
+        Словарь с access и refresh токенами
+    """
+    now = datetime.now()
+    access_expires = now + timedelta(seconds=current_app.config['JWT_ACCESS_TOKEN_EXPIRES'])
+    refresh_expires = now + timedelta(seconds=current_app.config['JWT_REFRESH_TOKEN_EXPIRES'])
+
+    access_payload = {
+        'type': 'access',
+        'account_id': account_id,
+        'public_id': public_id,
+        'exp': access_expires.timestamp(),
+        'iat': now.timestamp()
+    }
+
+    refresh_payload = {
+        'type': 'refresh',
+        'account_id': account_id,
+        'public_id': public_id,
+        'exp': refresh_expires.timestamp(),
+        'iat': now.timestamp()
+    }
+
+    access_token = jwt.encode(
+        access_payload,
+        current_app.config['JWT_SECRET_KEY'],
+        algorithm='HS256'
+    )
+
+    refresh_token = jwt.encode(
+        refresh_payload,
+        current_app.config['JWT_SECRET_KEY'],
+        algorithm='HS256'
+    )
+
+    return {
+        'access_token': access_token,
+        'refresh_token': refresh_token
+    }
+
+
+def verify_jwt_token(token: str, token_type: str = 'access') -> Optional[Dict]:
+    """
+    Верификация JWT токена.
+
+    Args:
+        token: JWT токен
+        token_type: Тип токена (access или refresh)
+
+    Returns:
+        Распарсенный payload или None если токен невалидный
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            current_app.config['JWT_SECRET_KEY'],
+            algorithms=['HS256']
+        )
+
+        # Проверяем тип токена
+        if payload.get('type') != token_type:
+            logger.warning(f"Wrong token type: expected {token_type}, got {payload.get('type')}")
+            return None
+
+        # Проверяем срок действия
+        if datetime.now().timestamp() > payload.get('exp', 0):
+            logger.warning("Token expired")
+            return None
+
+        return payload
+
+    except jwt.ExpiredSignatureError:
+        logger.warning("Token expired")
+        return None
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid token: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error verifying token: {e}")
+        return None
+
+
+def hash_string(data: str) -> str:
+    """
+    Хеширование строки с использованием SHA256.
+
+    Args:
+        data: Строка для хеширования
+
+    Returns:
+        Hex-строка хеша
+    """
+    return hashlib.sha256(data.encode('utf-8')).hexdigest()
+
+
+def create_user_session(account_id: int, refresh_token: str, user_agent: str) -> Optional[Dict[str, Any]]:
+    """
+    Создание сессии пользователя в БД.
+
+    Args:
+        account_id: ID аккаунта
+        refresh_token: Refresh токен
+        user_agent: User-Agent браузера
+
+    Returns:
+        Информация о созданной сессии или None при ошибке
+    """
+    try:
+        from .models import db, UserSession, Account
+
+        # Проверяем лимит сессий
+        max_sessions = current_app.config['MAX_SESSIONS_PER_USER']
+        session_count = UserSession.query.filter_by(account_id=account_id, is_active=True).count()
+
+        if session_count >= max_sessions:
+            # Находим и удаляем самую старую активную сессию
+            oldest_session = UserSession.query.filter_by(
+                account_id=account_id,
+                is_active=True
+            ).order_by(UserSession.created_at.asc()).first()
+
+            if oldest_session:
+                db.session.delete(oldest_session)
+                logger.info(f"Removed oldest session {oldest_session.session_id} for account {account_id}")
+
+        # Создаем новую сессию
+        session_id = secrets.token_urlsafe(32)
+        refresh_token_hash = hash_string(refresh_token)
+        user_agent_hash = hash_string(user_agent)
+
+        # Срок действия сессии (совпадает с refresh токеном)
+        expires_at = datetime.now() + timedelta(
+            seconds=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        )
+
+        session = UserSession(
+            account_id=account_id,
+            session_id=session_id,
+            refresh_token_hash=refresh_token_hash,
+            user_agent_hash=user_agent_hash,
+            expires_at=expires_at,
+            user_agent_original=user_agent[:500] if user_agent else None
+        )
+
+        db.session.add(session)
+        db.session.commit()
+
+        logger.info(f"Created session {session_id} for account {account_id}")
+
+        return {
+            'session_id': session_id,
+            'created_at': session.created_at,
+            'expires_at': session.expires_at
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create user session: {e}", exc_info=True)
+        db.session.rollback()
+        return None
+
+
+def verify_session(session_id: str, refresh_token: str, user_agent: str) -> Optional[Dict[str, Any]]:
+    """
+    Проверка сессии пользователя.
+
+    Args:
+        session_id: ID сессии
+        refresh_token: Refresh токен
+        user_agent: User-Agent браузера
+
+    Returns:
+        Информация о сессии или None если сессия невалидна
+    """
+    try:
+        from .models import UserSession
+
+        session = UserSession.query.filter_by(
+            session_id=session_id,
+            is_active=True
+        ).first()
+
+        if not session:
+            logger.warning(f"Session not found: {session_id}")
+            return None
+
+        # Проверяем срок действия
+        if datetime.now() > session.expires_at:
+            session.is_active = False
+            db.session.commit()
+            logger.info(f"Session expired: {session_id}")
+            return None
+
+        # Проверяем refresh токен
+        refresh_token_hash = hash_string(refresh_token)
+        if refresh_token_hash != session.refresh_token_hash:
+            logger.warning(f"Invalid refresh token for session: {session_id}")
+            return None
+
+        # Проверяем user-agent
+        user_agent_hash = hash_string(user_agent)
+        if user_agent_hash != session.user_agent_hash:
+            logger.warning(f"User-Agent mismatch for session: {session_id}")
+            return None
+
+        # Обновляем время последнего использования
+        session.last_used = datetime.now()
+        db.session.commit()
+
+        return {
+            'account_id': session.account_id,
+            'session_id': session_id,
+            'created_at': session.created_at,
+            'last_used': session.last_used
+        }
+
+    except Exception as e:
+        logger.error(f"Error verifying session: {e}", exc_info=True)
+        return None
+
+
+def set_session_cookie(response, session_id: str, access_token: str):
+    """
+    Установка сессионной куки.
+
+    Args:
+        response: Flask response object
+        session_id: ID сессии
+        access_token: Access токен
+    """
+    from flask import current_app
+
+    cookie_name = current_app.config['SESSION_COOKIE_NAME']
+    cookie_domain = current_app.config['SESSION_COOKIE_DOMAIN']
+    secure = current_app.config['SESSION_COOKIE_SECURE']
+    httponly = current_app.config['SESSION_COOKIE_HTTPONLY']
+    samesite = current_app.config['SESSION_COOKIE_SAMESITE']
+
+    # Сохраняем session_id и access_token в куке
+    cookie_value = f"{session_id}:{access_token}"
+
+    response.set_cookie(
+        cookie_name,
+        value=cookie_value,
+        max_age=current_app.config['JWT_REFRESH_TOKEN_EXPIRES'],
+        domain=cookie_domain,
+        secure=secure,
+        httponly=httponly,
+        samesite=samesite
+    )
+
+
+def get_session_from_cookie(request) -> Optional[Dict[str, str]]:
+    """
+    Извлечение сессии из куки.
+
+    Args:
+        request: Flask request object
+
+    Returns:
+        Словарь с session_id и access_token или None
+    """
+    from flask import current_app
+
+    cookie_name = current_app.config['SESSION_COOKIE_NAME']
+    cookie_value = request.cookies.get(cookie_name)
+
+    if not cookie_value:
+        return None
+
+    parts = cookie_value.split(':', 1)
+    if len(parts) != 2:
+        return None
+
+    return {
+        'session_id': parts[0],
+        'access_token': parts[1]
+    }
+
+
+def invalidate_session(session_id: str):
+    """
+    Инвалидация сессии.
+
+    Args:
+        session_id: ID сессии для инвалидации
+    """
+    try:
+        from .models import db, UserSession
+
+        session = UserSession.query.filter_by(session_id=session_id).first()
+        if session:
+            session.is_active = False
+            db.session.commit()
+            logger.info(f"Session invalidated: {session_id}")
+
+    except Exception as e:
+        logger.error(f"Error invalidating session: {e}", exc_info=True)
+        db.session.rollback()
+
+
+def invalidate_all_sessions(account_id: int):
+    """
+    Инвалидация всех сессий пользователя.
+
+    Args:
+        account_id: ID аккаунта
+    """
+    try:
+        from .models import db, UserSession
+
+        UserSession.query.filter_by(
+            account_id=account_id,
+            is_active=True
+        ).update({'is_active': False})
+
+        db.session.commit()
+        logger.info(f"All sessions invalidated for account: {account_id}")
+
+    except Exception as e:
+        logger.error(f"Error invalidating all sessions: {e}", exc_info=True)
+        db.session.rollback()
