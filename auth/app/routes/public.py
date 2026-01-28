@@ -371,7 +371,6 @@ def login():
 
 @bp.route("/verify", methods=["POST"])
 @limiter.limit("5 per 2 minutes, 20 per hour, 3 per minute")
-@require_valid_session_cookie
 def verify():
     pass
 
