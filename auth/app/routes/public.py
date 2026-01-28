@@ -375,12 +375,6 @@ def verify():
     pass
 
 
-@bp.route('/resend-verification', methods=['POST'])
-@limiter.limit("3 per 5 minutes, 10 per hour, 2 per 2 minutes")
-def resend_verification():
-    pass
-
-
 @bp.route("/2fa", methods=["POST"])
 @limiter.limit("5 per minute, 10 per hour")
 def tfa():
