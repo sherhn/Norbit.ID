@@ -33,6 +33,26 @@ class UserSession(db.Model):
         super().__init__(**kwargs)
 
 
+class ServiceToken(db.Model):
+    """Модель для токенов сервисов."""
+
+    __tablename__ = 'service_tokens'
+
+    id = db.Column(db.Integer, primary_key=True)
+    service_name = db.Column(db.String(100), nullable=False, index=True)
+    token_hash = db.Column(db.String(128), nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    last_used = db.Column(db.DateTime, nullable=True)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+
+    def __init__(self, **kwargs):
+        if 'created_at' not in kwargs:
+            kwargs['created_at'] = datetime.now()
+        super().__init__(**kwargs)
+
+
 class Account(db.Model):
     """Модель аккаунта."""
 

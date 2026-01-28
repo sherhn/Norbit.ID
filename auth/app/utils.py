@@ -9,7 +9,7 @@ import logging
 import re
 import requests
 from flask import current_app
-from .models import Account, db
+from .models import Account, ServiceToken, db
 import jwt
 import hashlib
 
@@ -17,6 +17,136 @@ logger = logging.getLogger(__name__)
 
 # Redis клиент
 redis_client = None
+
+
+def generate_service_token(length: int = 64) -> str:
+    """
+    Генерация токена для сервиса.
+
+    Args:
+        length: Длина токена
+
+    Returns:
+        Строка с токеном
+    """
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def hash_service_token(token: str) -> str:
+    """
+    Хеширование токена сервиса.
+
+    Args:
+        token: Токен для хеширования
+
+    Returns:
+        Hex-строка хеша
+    """
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def create_service_token(service_name: str, description: str = None,
+                         valid_days: int = 180) -> Optional[Dict[str, Any]]:
+    """
+    Создание токена для сервиса.
+
+    Args:
+        service_name: Название сервиса
+        description: Описание токена (опционально)
+        valid_days: Срок действия в днях
+
+    Returns:
+        Словарь с токеном и информацией или None при ошибке
+    """
+    try:
+        # Генерируем токен
+        token = generate_service_token()
+        token_hash = hash_service_token(token)
+
+        # Рассчитываем срок действия
+        created_at = datetime.now()
+        expires_at = created_at + timedelta(days=valid_days)
+
+        # Создаем запись в БД
+        service_token = ServiceToken(
+            service_name=service_name,
+            token_hash=token_hash,
+            description=description,
+            created_at=created_at,
+            expires_at=expires_at,
+            is_active=True
+        )
+
+        db.session.add(service_token)
+        db.session.commit()
+
+        logger.info(f"Service token created for service: {service_name}")
+
+        return {
+            'token': token,
+            'service_name': service_name,
+            'created_at': created_at.isoformat(),
+            'expires_at': expires_at.isoformat(),
+            'valid_days': valid_days
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create service token: {e}", exc_info=True)
+        db.session.rollback()
+        return None
+
+
+def validate_service_token(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Проверка валидности токена сервиса.
+
+    Args:
+        token: Токен для проверки
+
+    Returns:
+        Информация о токене или None если невалиден
+    """
+    try:
+        # Хешируем токен для поиска
+        token_hash = hash_service_token(token)
+
+        # Ищем токен в БД
+        service_token = ServiceToken.query.filter_by(
+            token_hash=token_hash,
+            is_active=True
+        ).first()
+
+        if not service_token:
+            logger.warning(f"Service token not found or inactive")
+            return None
+
+        # Проверяем срок действия
+        if datetime.now() > service_token.expires_at:
+            # Помечаем как неактивный
+            service_token.is_active = False
+            db.session.commit()
+            logger.info(f"Service token expired for service: {service_token.service_name}")
+            return None
+
+        # Обновляем время последнего использования
+        service_token.last_used = datetime.now()
+        db.session.commit()
+
+        logger.debug(f"Service token validated for: {service_token.service_name}")
+
+        return {
+            'id': service_token.id,
+            'service_name': service_token.service_name,
+            'description': service_token.description,
+            'created_at': service_token.created_at,
+            'expires_at': service_token.expires_at,
+            'last_used': service_token.last_used
+        }
+
+    except Exception as e:
+        logger.error(f"Error validating service token: {e}")
+        return None
 
 
 def validate_password_strength(password: str) -> tuple[bool, str]:

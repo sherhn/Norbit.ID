@@ -1,22 +1,37 @@
 from functools import wraps
 from flask import Blueprint, request, current_app, jsonify, g
-from ..utils import get_account_by_public_id, is_session_valid
+from ..utils import get_account_by_public_id, is_session_valid, validate_service_token
 
 bp = Blueprint('internal', __name__)
 
 
-def require_internal_key(f):
+def require_internal_token(f):
+    """
+    Декоратор для проверки валидности токена сервиса.
+    Ожидает токен в заголовке X-Service-Token.
+    """
+
     @wraps(f)
     def decorated(*args, **kwargs):
-        provided_key = (
-            request.headers.get('X-API-Key') or
-            (request.get_json(silent=True) or {}).get('api_key')
-        )
-        expected_key = current_app.config['INTERNAL_API_KEY']
-        if not provided_key or provided_key != expected_key:
-            current_app.logger.warning(f"Unauthorized access attempt from {request.remote_addr}")
-            return jsonify({"error": "Unauthorized"}), 401
+        # Получаем токен из заголовка
+        service_token = request.headers.get('X-Service-Token')
+
+        if not service_token:
+            current_app.logger.warning(f"Missing service token from {request.remote_addr}")
+            return jsonify({"error": "Service token required"}), 401
+
+        # Проверяем токен
+        token_info = validate_service_token(service_token)
+        if not token_info:
+            current_app.logger.warning(f"Invalid service token from {request.remote_addr}")
+            return jsonify({"error": "Invalid or expired service token"}), 401
+
+        # Сохраняем информацию о сервисе в контексте
+        g.service_info = token_info
+        current_app.logger.info(f"Service authenticated: {token_info['service_name']}")
+
         return f(*args, **kwargs)
+
     return decorated
 
 
@@ -76,8 +91,52 @@ def require_valid_session(f):
     return decorated
 
 
+@bp.route("/get-service-token", methods=["POST"])
+def get_service_token():
+    """
+    Получение токена для сервиса.\
+    """
+    try:
+        # Получаем данные для создания токена
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        service_name = data.get('service_name')
+        description = data.get('description', '')
+
+        if not service_name:
+            return jsonify({"error": "service_name is required"}), 400
+
+        # Создаем токен
+        from ..utils import create_service_token
+        token_info = create_service_token(
+            service_name=service_name,
+            description=description,
+            valid_days=180
+        )
+
+        if not token_info:
+            return jsonify({"error": "Failed to create service token"}), 500
+
+        current_app.logger.info(f"Service token created for: {service_name}")
+
+        # Возвращаем токен (обратите внимание: токен возвращается только один раз!)
+        return jsonify({
+            "success": True,
+            "token": token_info['token'],
+            "service_name": token_info['service_name'],
+            "expires_at": token_info['expires_at'],
+            "warning": "Save this token securely. It will not be shown again."
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error creating service token: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @bp.route("/validate-session", methods=["GET"])
-@require_internal_key
+@require_internal_token
 def validate_session():
     """Валидация сессии пользователя"""
     try:
@@ -120,7 +179,7 @@ def validate_session():
 
 
 @bp.route("/get-account-info", methods=["POST"])
-@require_internal_key
+@require_internal_token
 @require_valid_session
 def get_account_info():
     """Получение информации об аккаунте по public_id или email"""
@@ -157,27 +216,27 @@ def get_account_info():
 
 
 @bp.route("/get-session-info", methods=["POST"])
-@require_internal_key
+@require_internal_token
 @require_valid_session
 def get_session_info():
     pass
 
 
 @bp.route("/logout", methods=["POST"])
-@require_internal_key
+@require_internal_token
 @require_valid_session
 def logout():
     pass
 
 
 @bp.route("/logout-all", methods=["POST"])
-@require_internal_key
+@require_internal_token
 @require_valid_session
 def logout_all():
     pass
 
 
 @bp.route("/refresh", methods=["POST"])
-@require_internal_key
+@require_internal_token
 def refresh():
     pass

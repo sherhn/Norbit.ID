@@ -34,7 +34,7 @@ def create_app() -> Flask:
                     SELECT table_name 
                     FROM information_schema.tables 
                     WHERE table_schema = 'public' 
-                    AND table_name IN ('accounts', 'user_sessions')
+                    AND table_name IN ('accounts', 'user_sessions', 'service_tokens')
                 """))
                 existing_tables = [row[0] for row in result]
 
@@ -47,6 +47,10 @@ def create_app() -> Flask:
                 if 'user_sessions' in existing_tables:
                     db.session.execute(text("SELECT enable_table_audit('user_sessions')"))
                     app.logger.info("Audit enabled for user_sessions table")
+
+                if 'service_tokens' in existing_tables:
+                    db.session.execute(text("SELECT enable_table_audit('service_tokens')"))
+                    app.logger.info("Audit enabled for service_tokens table")
 
                 db.session.commit()
                 app.logger.info("Database audit triggers enabled successfully")
