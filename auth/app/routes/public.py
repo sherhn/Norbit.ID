@@ -317,15 +317,15 @@ def logout():
     pass
 
 
-@bp.route("/reset", methods=["POST"])
-@limiter.limit("5 per minute, 10 per hour")
-def reset():
-    pass
-
-
 @bp.route("/logout-all", methods=["POST"])
 @limiter.limit("5 per minute, 10 per hour")
 def logout_all():
+    pass
+
+
+@bp.route("/reset", methods=["POST"])
+@limiter.limit("5 per minute, 10 per hour")
+def reset():
     pass
 
 
