@@ -135,7 +135,7 @@ def get_service_token():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@bp.route("/validate-session", methods=["GET"])
+@bp.route("/validate-session", methods=["POST"])
 @require_internal_token
 def validate_session():
     """Валидация сессии пользователя"""
