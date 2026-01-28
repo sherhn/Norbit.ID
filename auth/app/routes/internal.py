@@ -167,7 +167,7 @@ def validate_session():
 
         return jsonify({
             "valid": is_valid,
-            "session_id": session_id if len(session_id) < 20 else session_id[:20] + '...'
+            "session_id": session_id
         }), 200
 
     except Exception as e:
