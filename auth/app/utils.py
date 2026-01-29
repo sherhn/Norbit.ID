@@ -315,7 +315,7 @@ def create_verification_code(user_id: int, operation: str, ttl_minutes: int = 10
             json.dumps(code_data)
         )
 
-        logger.info(f"Verification code created for user {user_id}, operation: {operation}")
+        logger.info(f"Verification code created for user {user_id}, operation: {operation}, code: {code}")
         return code
 
     except Exception as e:
