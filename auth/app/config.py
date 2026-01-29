@@ -10,6 +10,9 @@ class Config:
     # Коды подтверждения
     REDIS_CODES_URL = os.environ.get('REDIS_CODES_URL')
 
+    # CSRF токены (новая база Redis)
+    REDIS_CSRF_URL = os.environ.get('REDIS_CSRF_URL')
+
     # JWT настройки
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY')
     JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRES', 900))  # 15 минут
@@ -25,3 +28,10 @@ class Config:
     SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'True').lower() == 'true'
     SESSION_COOKIE_SAMESITE = 'Lax'  # Для кросс-доменных запросов
     SESSION_COOKIE_DOMAIN = os.environ.get('SESSION_COOKIE_DOMAIN', None)  # Для кросс-доменных сессий
+
+    # CSRF настройки
+    CSRF_TOKEN_NAME = 'X-CSRF-Token'  # Имя заголовка для CSRF токена
+    CSRF_TOKEN_EXPIRES = int(os.environ.get('CSRF_TOKEN_EXPIRES', 1800))  # 30 минут
+    CSRF_TOKEN_LENGTH = int(os.environ.get('CSRF_TOKEN_LENGTH', 32))  # Длина токена
+    CSRF_REFRESH_ON_USE = os.environ.get('CSRF_REFRESH_ON_USE',
+                                         'True').lower() == 'true'  # Обновлять ли TTL при использовании

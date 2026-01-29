@@ -11,7 +11,7 @@ from ..utils import create_verification_code, validate_password_strength, send_v
     create_user_session, create_jwt_tokens, is_session_valid, clear_session_cookie, delete_session_by_id, \
     delete_all_sessions_by_account_id, get_session_account_id, get_session_from_cookie, hash_string, \
     verify_code_for_operation, confirm_registration, issue_session_for_account, change_account_password, \
-    delete_verification_code, delete_account_from_db
+    delete_verification_code, delete_account_from_db, create_csrf_token, delete_csrf_token, validate_csrf_token
 
 bp = Blueprint('public', __name__)
 
@@ -73,6 +73,103 @@ def require_valid_session_cookie(f):
             }), 500
 
     return decorated
+
+
+def require_csrf_token(f):
+    """
+    Декоратор для проверки CSRF токена.
+    Ожидает токен в заголовке X-CSRF-Token.
+    Работает только для методов, изменяющих состояние (POST, PUT, PATCH, DELETE).
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Проверяем, нужна ли CSRF защита для этого метода
+        if request.method not in ['POST', 'PUT', 'PATCH', 'DELETE']:
+            # Для безопасных методов (GET, HEAD, OPTIONS) не проверяем CSRF
+            return f(*args, **kwargs)
+
+        try:
+            # Получаем session_id из g (должен быть установлен декоратором сессии)
+            if not hasattr(g, 'session_id'):
+                current_app.logger.warning("CSRF check failed: no session_id in g")
+                return jsonify({
+                    "message": "Session required for CSRF protection",
+                    "detail": "Missing session context"
+                }), 401
+
+            session_id = g.session_id
+
+            # Получаем CSRF токен из заголовка
+            csrf_token = request.headers.get(current_app.config.get('CSRF_TOKEN_NAME', 'X-CSRF-Token'))
+
+            if not csrf_token:
+                current_app.logger.warning(f"Missing CSRF token for session: {session_id[:10]}...")
+                return jsonify({
+                    "message": "CSRF token required",
+                    "detail": "Missing X-CSRF-Token header"
+                }), 403
+
+            # Проверяем CSRF токен
+            if not validate_csrf_token(session_id, csrf_token):
+                current_app.logger.warning(f"Invalid CSRF token for session: {session_id[:10]}...")
+                return jsonify({
+                    "message": "Invalid CSRF token",
+                    "detail": "CSRF token is invalid or expired"
+                }), 403
+
+            # Сохраняем информацию о CSRF валидации в g
+            g.csrf_validated = True
+
+            current_app.logger.debug(f"CSRF token validated for session: {session_id[:10]}...")
+            return f(*args, **kwargs)
+
+        except Exception as e:
+            current_app.logger.error(f"Error in CSRF validation: {e}", exc_info=True)
+            return jsonify({
+                "message": "CSRF validation failed",
+                "detail": "Internal server error during CSRF check"
+            }), 500
+
+    return decorated
+
+
+@bp.route("/get-csrf-token", methods=["GET", "POST"])
+@limiter.limit("30 per minute, 100 per hour")
+@require_valid_session_cookie
+def get_csrf_token():
+    """
+    Получение CSRF токена для текущей сессии.
+    Должен вызываться после успешной аутентификации.
+    """
+    try:
+        # Получаем session_id из g (уже проверено декоратором)
+        session_id = g.session_id
+
+        # Создаем CSRF токен
+        csrf_token = create_csrf_token(session_id)
+
+        if not csrf_token:
+            return jsonify({
+                "message": "Failed to generate CSRF token",
+                "detail": "Internal server error"
+            }), 500
+
+        current_app.logger.info(f"CSRF token generated for session: {session_id[:10]}...")
+
+        return jsonify({
+            "message": "CSRF token generated",
+            "csrf_token": csrf_token,
+            "csrf_token_header": current_app.config.get('CSRF_TOKEN_NAME', 'X-CSRF-Token'),
+            "expires_in": current_app.config.get('CSRF_TOKEN_EXPIRES', 1800)
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error generating CSRF token: {e}", exc_info=True)
+        return jsonify({
+            "message": "Internal error",
+            "detail": "Failed to generate CSRF token"
+        }), 500
 
 
 @bp.route("/registration", methods=["POST"])
@@ -342,6 +439,9 @@ def login():
             session.refresh_token_hash = hash_string(tokens['refresh_token'])
             db.session.commit()
 
+        # Создаем CSRF токен для этой сессии
+        csrf_token = create_csrf_token(session_info['session_id'])
+
         # Создаем ответ и устанавливаем куки
         response_data = {
             "message": "Login successful",
@@ -363,6 +463,14 @@ def login():
                 "refresh_expires_in": current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
             }
         }
+
+        # Добавляем CSRF токен в ответ, если он был создан
+        if csrf_token:
+            response_data["csrf"] = {
+                "token": csrf_token,
+                "header": current_app.config.get('CSRF_TOKEN_NAME', 'X-CSRF-Token'),
+                "expires_in": current_app.config.get('CSRF_TOKEN_EXPIRES', 1800)
+            }
 
         response = make_response(jsonify(response_data), 200)
 
@@ -467,6 +575,9 @@ def verify():
             session_data = issue_session_for_account(updated_account, user_agent)
 
             if session_data:
+                # Создаем CSRF токен для новой сессии
+                csrf_token = create_csrf_token(session_data['session_info']['session_id'])
+
                 # Создаем ответ и устанавливаем куки
                 response_data = {
                     "message": "Registration confirmed successfully",
@@ -488,6 +599,14 @@ def verify():
                         "refresh_expires_in": current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
                     }
                 }
+
+                # Добавляем CSRF токен в ответ
+                if csrf_token:
+                    response_data["csrf"] = {
+                        "token": csrf_token,
+                        "header": current_app.config.get('CSRF_TOKEN_NAME', 'X-CSRF-Token'),
+                        "expires_in": current_app.config.get('CSRF_TOKEN_EXPIRES', 1800)
+                    }
 
                 response = make_response(jsonify(response_data), 200)
                 set_session_cookie(response, session_data['session_info']['session_id'],
@@ -526,6 +645,9 @@ def verify():
                 twofa_result = handle_2fa_verification(account, enable_2fa=False)
 
                 if twofa_result['success'] and twofa_result['requires_session']:
+                    # Создаем CSRF токен для новой сессии
+                    csrf_token = create_csrf_token(twofa_result['session_data']['session_info']['session_id'])
+
                     # Создаем ответ и устанавливаем куки
                     response_data = {
                         "message": "Two-factor authentication successful",
@@ -548,6 +670,14 @@ def verify():
                             "refresh_expires_in": current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
                         }
                     }
+
+                    # Добавляем CSRF токен в ответ
+                    if csrf_token:
+                        response_data["csrf"] = {
+                            "token": csrf_token,
+                            "header": current_app.config.get('CSRF_TOKEN_NAME', 'X-CSRF-Token'),
+                            "expires_in": current_app.config.get('CSRF_TOKEN_EXPIRES', 1800)
+                        }
 
                     response = make_response(jsonify(response_data), 200)
                     set_session_cookie(response,
@@ -573,22 +703,62 @@ def verify():
             if not is_valid:
                 return jsonify({"message": message}), 400
 
+            # Для сброса пароля требуется сессия (уже проверена выше)
+            session_data = get_session_from_cookie(request)
+            if not session_data:
+                return jsonify({"message": "Session required for password reset"}), 401
+
+            # Проверяем, что это действительно сессия того же пользователя
+            session_account_id = get_session_account_id(session_data['session_id'])
+            if session_account_id != account.id:
+                return jsonify({"message": "Session-user mismatch for password reset"}), 403
+
             # Изменяем пароль
             if change_account_password(account.id, new_password):
                 # Удаляем код подтверждения (после успешного использования)
                 delete_verification_code(account.id, 'reset')
 
-                current_app.logger.info(f"Password reset successful for: {account.email}")
-                return jsonify({
+                # Удаляем все сессии пользователя (требуется повторный вход)
+                delete_all_sessions_by_account_id(account.id)
+
+                # Удаляем CSRF токен для текущей сессии
+                delete_csrf_token(session_data['session_id'])
+
+                # Очищаем куки
+                response = make_response(jsonify({
                     "message": "Password reset successful",
-                    "detail": "You can now login with your new password"
-                }), 200
+                    "detail": "Password has been changed. All sessions have been terminated. Please login again."
+                }), 200)
+
+                clear_session_cookie(response)
+
+                current_app.logger.info(f"Password reset successful for: {account.email}")
+                return response
             else:
                 return jsonify({"message": "Failed to reset password"}), 500
 
         elif operation == 'delete':
             # Удаление аккаунта
+            # Для удаления аккаунта требуется сессия (уже проверена выше)
+            session_data = get_session_from_cookie(request)
+            if not session_data:
+                return jsonify({"message": "Session required for account deletion"}), 401
+
+            # Проверяем, что это действительно сессия того же пользователя
+            session_account_id = get_session_account_id(session_data['session_id'])
+            if session_account_id != account.id:
+                return jsonify({"message": "Session-user mismatch for account deletion"}), 403
+
             if delete_account_from_db(account.id):
+                # Удаляем код подтверждения (после успешного использования)
+                delete_verification_code(account.id, 'delete')
+
+                # Удаляем все сессии пользователя
+                delete_all_sessions_by_account_id(account.id)
+
+                # Удаляем CSRF токен
+                delete_csrf_token(session_data['session_id'])
+
                 # Очищаем куки
                 response = make_response(jsonify({
                     "message": "Account deleted successfully",
@@ -670,12 +840,17 @@ def tfa():
 @bp.route("/logout", methods=["POST"])
 @limiter.limit("20 per minute, 50 per hour")
 @require_valid_session_cookie
+@require_csrf_token
 def logout():
     """Выход из текущей сессии"""
     try:
-        # Получаем session_id из g (уже проверено декоратором)
+        # Получаем session_id из g (уже проверено декораторами)
         session_id = g.session_id
 
+        # Удаляем CSRF токен
+        delete_csrf_token(session_id)
+
+        # Удаляем сессию из БД
         deleted = delete_session_by_id(session_id)
 
         if deleted:
@@ -716,10 +891,11 @@ def logout():
 @bp.route("/logout-all", methods=["POST"])
 @limiter.limit("5 per minute, 10 per hour")
 @require_valid_session_cookie
+@require_csrf_token
 def logout_all():
     """Выход из всех сессий пользователя"""
     try:
-        # Получаем session_id из g (уже проверено декоратором)
+        # Получаем session_id из g (уже проверено декораторами)
         session_id = g.session_id
 
         # Получаем account_id по session_id
@@ -728,7 +904,10 @@ def logout_all():
         if not account_id:
             current_app.logger.warning(f"Cannot find account for session: {session_id[:10]}...")
 
-            # Все равно очищаем куку
+            # Удаляем CSRF токен текущей сессии
+            delete_csrf_token(session_id)
+
+            # Очищаем куку
             response = make_response(jsonify({
                 "message": "Session cookie cleared",
                 "detail": "Account not found for session"
@@ -738,6 +917,9 @@ def logout_all():
 
         # Удаляем все сессии аккаунта из БД
         deleted = delete_all_sessions_by_account_id(account_id)
+
+        # Удаляем CSRF токен текущей сессии
+        delete_csrf_token(session_id)
 
         if deleted:
             current_app.logger.info(f"All sessions deleted for account: {account_id}")
@@ -843,6 +1025,7 @@ def reset():
 @bp.route("/delete", methods=["POST"])
 @limiter.limit("5 per minute, 10 per hour")
 @require_valid_session_cookie
+@require_csrf_token
 def delete():
     """Запрос на удаление аккаунта (отправка кода подтверждения)"""
     try:
@@ -897,6 +1080,7 @@ def delete():
 
 @bp.route("/refresh", methods=["POST"])
 @limiter.limit("10 per minute, 30 per hour")
+@require_csrf_token
 def refresh():
     """Обновление access_token с использованием refresh_token"""
     try:

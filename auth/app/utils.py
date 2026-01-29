@@ -17,7 +17,8 @@ import pyotp
 logger = logging.getLogger(__name__)
 
 # Redis клиент
-redis_client = None
+redis_codes_client = None
+redis_csrf_client = None
 
 
 def generate_service_token(length: int = 64) -> str:
@@ -189,33 +190,52 @@ def validate_password_strength(password: str) -> tuple[bool, str]:
     return True, "Пароль соответствует требованиям безопасности"
 
 
-def get_redis_client():
-    """Инициализация и получение Redis клиента через URL."""
-    global redis_client
-    if redis_client is None:
-        try:
-            # Получаем URL из конфига
-            redis_url = current_app.config.get('REDIS_CODES_URL')
+def get_redis_client(redis_type: str = 'codes'):
+    """
+    Инициализация и получение Redis клиента для разных целей.
 
-            # Подключаемся к редису
-            redis_client = redis.Redis.from_url(
-                redis_url,
-                decode_responses=False,
-                socket_timeout=5,
-                socket_connect_timeout=5,
-                retry_on_timeout=True,
-                max_connections=10
-            )
+    Args:
+        redis_type: Тип Redis ('codes' или 'csrf')
 
-            # Проверяем соединение
-            redis_client.ping()
-            logger.info(f"Redis connection established: {redis_url.split('@')[-1]}")
+    Returns:
+        Redis клиент
+    """
+    global redis_codes_client, redis_csrf_client
 
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
+    try:
+        if redis_type == 'codes':
+            if redis_codes_client is None:
+                redis_url = current_app.config.get('REDIS_CODES_URL')
+                redis_codes_client = redis.Redis.from_url(
+                    redis_url,
+                    decode_responses=False,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    retry_on_timeout=True,
+                    max_connections=10
+                )
+                redis_codes_client.ping()
+                logger.info(f"Redis codes connection established: {redis_url.split('@')[-1]}")
+            return redis_codes_client
 
-    return redis_client
+        elif redis_type == 'csrf':
+            if redis_csrf_client is None:
+                redis_url = current_app.config.get('REDIS_CSRF_URL')
+                redis_csrf_client = redis.Redis.from_url(
+                    redis_url,
+                    decode_responses=False,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    retry_on_timeout=True,
+                    max_connections=10
+                )
+                redis_csrf_client.ping()
+                logger.info(f"Redis CSRF connection established: {redis_url.split('@')[-1]}")
+            return redis_csrf_client
+
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis ({redis_type}): {e}")
+        raise
 
 
 def generate_verification_code(length: int = 6) -> str:
@@ -1143,3 +1163,149 @@ def handle_2fa_verification(account: Account, enable_2fa: bool = False) -> Dict[
             'session_data': None,
             'message': str(e)
         }
+
+
+def generate_csrf_token() -> str:
+    """
+    Генерация CSRF токена.
+
+    Returns:
+        Строка с CSRF токеном
+    """
+    token_length = current_app.config.get('CSRF_TOKEN_LENGTH', 32)
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(token_length))
+
+
+def create_csrf_token(session_id: str) -> str:
+    """
+    Создание и сохранение CSRF токена для сессии.
+
+    Args:
+        session_id: ID сессии пользователя
+
+    Returns:
+        CSRF токен
+    """
+    try:
+        redis_client = get_redis_client('csrf')
+
+        # Генерируем токен
+        csrf_token = generate_csrf_token()
+
+        # Создаем ключ для Redis
+        redis_key = f"csrf_token:{session_id}"
+
+        # Сохраняем хеш токена в Redis
+        csrf_token_hash = hashlib.sha256(csrf_token.encode('utf-8')).hexdigest()
+
+        # Сохраняем с TTL
+        expires_seconds = current_app.config.get('CSRF_TOKEN_EXPIRES', 1800)
+        redis_client.setex(redis_key, expires_seconds, csrf_token_hash)
+
+        logger.debug(f"CSRF token created for session: {session_id[:10]}...")
+        return csrf_token
+
+    except Exception as e:
+        logger.error(f"Failed to create CSRF token: {e}")
+        # В случае ошибки возвращаем пустой токен
+        return ""
+
+
+def validate_csrf_token(session_id: str, csrf_token: str, refresh_ttl: bool = True) -> bool:
+    """
+    Проверка CSRF токена.
+
+    Args:
+        session_id: ID сессии пользователя
+        csrf_token: CSRF токен для проверки
+        refresh_ttl: Обновлять ли TTL токена при успешной проверке
+
+    Returns:
+        True если токен валиден, иначе False
+    """
+    try:
+        if not csrf_token or not session_id:
+            logger.warning("Empty CSRF token or session_id")
+            return False
+
+        redis_client = get_redis_client('csrf')
+        redis_key = f"csrf_token:{session_id}"
+
+        # Получаем сохраненный хеш токена
+        stored_hash = redis_client.get(redis_key)
+        if not stored_hash:
+            logger.warning(f"No CSRF token found for session: {session_id[:10]}...")
+            return False
+
+        # Вычисляем хеш предоставленного токена
+        provided_hash = hashlib.sha256(csrf_token.encode('utf-8')).hexdigest()
+
+        # Сравниваем хеши
+        if provided_hash.encode('utf-8') != stored_hash:
+            logger.warning(f"CSRF token mismatch for session: {session_id[:10]}...")
+            return False
+
+        # Если нужно обновить TTL
+        if refresh_ttl and current_app.config.get('CSRF_REFRESH_ON_USE', True):
+            expires_seconds = current_app.config.get('CSRF_TOKEN_EXPIRES', 1800)
+            redis_client.expire(redis_key, expires_seconds)
+
+        logger.debug(f"CSRF token validated for session: {session_id[:10]}...")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error validating CSRF token: {e}")
+        return False
+
+
+def delete_csrf_token(session_id: str) -> bool:
+    """
+    Удаление CSRF токена из Redis.
+
+    Args:
+        session_id: ID сессии
+
+    Returns:
+        True если удалено, иначе False
+    """
+    try:
+        redis_client = get_redis_client('csrf')
+        redis_key = f"csrf_token:{session_id}"
+
+        deleted = redis_client.delete(redis_key)
+        if deleted:
+            logger.debug(f"CSRF token deleted for session: {session_id[:10]}...")
+        return deleted > 0
+
+    except Exception as e:
+        logger.error(f"Error deleting CSRF token: {e}")
+        return False
+
+
+def get_csrf_token_for_session(session_id: str) -> Optional[str]:
+    """
+    Получение CSRF токена для сессии (если существует).
+    В основном используется для отладки и администрирования.
+
+    Args:
+        session_id: ID сессии
+
+    Returns:
+        CSRF токен или None если не существует
+    """
+    try:
+        redis_client = get_redis_client('csrf')
+        redis_key = f"csrf_token:{session_id}"
+
+        # Проверяем существование токена
+        exists = redis_client.exists(redis_key)
+        if not exists:
+            return None
+
+        # Возвращаем признак существования (не сам токен из соображений безопасности)
+        return "[exists]"
+
+    except Exception as e:
+        logger.error(f"Error getting CSRF token info: {e}")
+        return None
