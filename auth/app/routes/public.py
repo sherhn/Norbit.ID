@@ -231,12 +231,10 @@ def registration():
             )
 
             if verification_code:
-                # Попытка отправки кода подтверждения на email
-                email_sent = send_verification_email(
-                    email=email,
-                    code=verification_code,
-                    operation='registration'
-                )
+
+                # ДЛЯ ОТЛАДКИ
+                email_sent = True
+                current_app.logger.info(f"Verification code sent to email: {verification_code}")
 
                 if email_sent:
                     # Успешная отправка email
@@ -347,11 +345,9 @@ def login():
             )
 
             if verification_code:
-                email_sent = send_verification_email(
-                    email=account.email,
-                    code=verification_code,
-                    operation='registration'
-                )
+                # ДЛЯ ОТЛАДКИ
+                email_sent = True
+                current_app.logger.info(f"Verification code sent to email: {verification_code}")
 
                 if email_sent:
                     return jsonify({
@@ -387,11 +383,9 @@ def login():
             )
 
             if verification_code:
-                email_sent = send_verification_email(
-                    email=account.email,
-                    code=verification_code,
-                    operation='login'
-                )
+                # ДЛЯ ОТЛАДКИ
+                email_sent = True
+                current_app.logger.info(f"Verification code sent to email: {verification_code}")
 
                 if email_sent:
                     return jsonify({
@@ -813,11 +807,9 @@ def tfa():
             current_app.logger.error(f"Failed to create verification code for 2FA: {account.id}")
             return jsonify({"message": "Failed to generate verification code"}), 500
 
-        email_sent = send_verification_email(
-            email=account.email,
-            code=verification_code,
-            operation='login'
-        )
+        # ДЛЯ ОТЛАДКИ
+        email_sent = True
+        current_app.logger.info(f"Verification code sent to email: {verification_code}")
 
         if email_sent:
             current_app.logger.info(f"2FA code sent to email for: {account.email}")
@@ -998,11 +990,9 @@ def reset():
             current_app.logger.error(f"Failed to create verification code for reset: {account.id}")
             return jsonify({"message": "Failed to generate verification code"}), 500
 
-        email_sent = send_verification_email(
-            email=account.email,
-            code=verification_code,
-            operation='reset'
-        )
+        # ДЛЯ ОТЛАДКИ
+        email_sent = True
+        current_app.logger.info(f"Verification code sent to email: {verification_code}")
 
         if email_sent:
             current_app.logger.info(f"Reset code sent to email for: {account.email}")
