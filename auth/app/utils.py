@@ -504,13 +504,14 @@ def get_account_by_public_id(public_id: str = None, email: str = None) -> Option
         return None
 
 
-def create_jwt_tokens(account_id: int, public_id: str) -> Dict[str, str]:
+def create_jwt_tokens(account_id: int, public_id: str, session_id: str = None) -> Dict[str, str]:
     """
     Создание JWT токенов (access и refresh).
 
     Args:
         account_id: ID аккаунта в БД
         public_id: Публичный ID аккаунта
+        session_id: ID сессии
 
     Returns:
         Словарь с access и refresh токенами
@@ -519,20 +520,28 @@ def create_jwt_tokens(account_id: int, public_id: str) -> Dict[str, str]:
     access_expires = now + timedelta(seconds=current_app.config['JWT_ACCESS_TOKEN_EXPIRES'])
     refresh_expires = now + timedelta(seconds=current_app.config['JWT_REFRESH_TOKEN_EXPIRES'])
 
+    # session_id обязателен для access токена
+    if not session_id:
+        raise ValueError("session_id is required for JWT token creation")
+
     access_payload = {
         'type': 'access',
         'account_id': account_id,
         'public_id': public_id,
+        'session_id': session_id,
         'exp': access_expires.timestamp(),
-        'iat': now.timestamp()
+        'iat': now.timestamp(),
+        'jti': secrets.token_urlsafe(16)
     }
 
     refresh_payload = {
         'type': 'refresh',
         'account_id': account_id,
         'public_id': public_id,
+        'session_id': session_id,
         'exp': refresh_expires.timestamp(),
-        'iat': now.timestamp()
+        'iat': now.timestamp(),
+        'jti': secrets.token_urlsafe(16)
     }
 
     access_token = jwt.encode(
@@ -553,13 +562,14 @@ def create_jwt_tokens(account_id: int, public_id: str) -> Dict[str, str]:
     }
 
 
-def verify_jwt_token(token: str, token_type: str = 'access') -> Optional[Dict]:
+def verify_jwt_token(token: str, token_type: str = 'access', expected_session_id: str = None) -> Optional[Dict]:
     """
     Верификация JWT токена.
 
     Args:
         token: JWT токен
         token_type: Тип токена (access или refresh)
+        expected_session_id: Ожидаемый session_id (для дополнительной проверки)
 
     Returns:
         Распарсенный payload или None если токен невалидный
@@ -579,6 +589,12 @@ def verify_jwt_token(token: str, token_type: str = 'access') -> Optional[Dict]:
         # Проверяем срок действия
         if datetime.now().timestamp() > payload.get('exp', 0):
             logger.warning("Token expired")
+            return None
+
+        # Дополнительная проверка session_id
+        if expected_session_id and payload.get('session_id') != expected_session_id:
+            logger.warning(f"Session ID mismatch: expected {expected_session_id}, "
+                         f"got {payload.get('session_id')}")
             return None
 
         return payload
@@ -637,7 +653,7 @@ def create_user_session(account_id: int, refresh_token: str, user_agent: str) ->
                 db.session.delete(oldest_session)
                 logger.info(f"Removed oldest session {oldest_session.session_id} for account {account_id}")
 
-        # Создаем новую сессию
+        # Создаем session_id
         session_id = secrets.token_urlsafe(32)
         refresh_token_hash = hash_string(refresh_token)
         user_agent_hash = hash_string(user_agent)
@@ -647,6 +663,7 @@ def create_user_session(account_id: int, refresh_token: str, user_agent: str) ->
             seconds=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
         )
 
+        # Создаем сессию
         session = UserSession(
             account_id=account_id,
             session_id=session_id,
@@ -765,7 +782,7 @@ def is_session_valid(session_id: str, access_token: str) -> bool:
             logger.debug(f"Session not found or inactive: {session_id}")
             return False
 
-        # Проверяем срок действия
+        # Проверяем срок действия сессии
         if datetime.now() > session.expires_at:
             logger.debug(f"Session expired: {session_id}")
             # Помечаем как неактивную
@@ -773,13 +790,18 @@ def is_session_valid(session_id: str, access_token: str) -> bool:
             db.session.commit()
             return False
 
-        # Проверяем access токен
-        token_payload = verify_jwt_token(access_token, token_type='access')
+        # Проверяем access токен с ожидаемым session_id
+        token_payload = verify_jwt_token(
+            access_token,
+            token_type='access',
+            expected_session_id=session_id  # Ключевое исправление!
+        )
+
         if not token_payload:
             logger.debug(f"Invalid access token for session: {session_id}")
             return False
 
-        # Проверяем что токен принадлежит владельцу сессии
+        # Дополнительная проверка account_id (опционально, но рекомендуется)
         if token_payload.get('account_id') != session.account_id:
             logger.debug(f"Token account_id mismatch for session: {session_id}")
             return False

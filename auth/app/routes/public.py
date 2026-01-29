@@ -4,10 +4,10 @@ from functools import wraps
 from email_validator import validate_email, EmailNotValidError
 from flask import Blueprint, request, current_app, jsonify, make_response, g
 from ..limiter import limiter
-from ..models import db, Account
+from ..models import db, Account, UserSession
 from ..utils import create_verification_code, validate_password_strength, send_verification_email, set_session_cookie, \
     create_user_session, create_jwt_tokens, is_session_valid, clear_session_cookie, delete_session_by_id, \
-    delete_all_sessions_by_account_id, get_session_account_id, get_session_from_cookie
+    delete_all_sessions_by_account_id, get_session_account_id, get_session_from_cookie, hash_string
 
 bp = Blueprint('public', __name__)
 
@@ -315,16 +315,28 @@ def login():
                 }), 200
 
         # Если все проверки пройдены - создаем сессию
-        tokens = create_jwt_tokens(account.id, account.public_id)
-
+        # Сначала создаем сессию без токенов
         session_info = create_user_session(
             account_id=account.id,
-            refresh_token=tokens['refresh_token'],
+            refresh_token="",  # Временное значение
             user_agent=user_agent
         )
 
         if not session_info:
             return jsonify({"message": "Failed to create session"}), 500
+
+        # Создаем JWT токены с session_id
+        tokens = create_jwt_tokens(
+            account_id=account.id,
+            public_id=account.public_id,
+            session_id=session_info['session_id']  # Ключевое изменение!
+        )
+
+        # Обновляем refresh_token_hash в сессии
+        session = UserSession.query.filter_by(session_id=session_info['session_id']).first()
+        if session:
+            session.refresh_token_hash = hash_string(tokens['refresh_token'])
+            db.session.commit()
 
         # Создаем ответ и устанавливаем куки
         response_data = {
@@ -339,6 +351,12 @@ def login():
                 "session_id": session_info['session_id'],
                 "created_at": session_info['created_at'].isoformat(),
                 "expires_at": session_info['expires_at'].isoformat()
+            },
+            "tokens": {
+                "access_token": tokens['access_token'],
+                "refresh_token": tokens['refresh_token'],
+                "access_expires_in": current_app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+                "refresh_expires_in": current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
             }
         }
 
@@ -347,7 +365,7 @@ def login():
         # Устанавливаем сессионную куку
         set_session_cookie(response, session_info['session_id'], tokens['access_token'])
 
-        current_app.logger.info(f"Successful login for: {account.email}")
+        current_app.logger.info(f"Successful login for: {account.email}, session: {session_info['session_id'][:10]}...")
         return response
 
     except Exception as e:
