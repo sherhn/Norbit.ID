@@ -474,10 +474,3 @@ def logout_all():
             "error": "Internal server error",
             "session_valid": True
         }), 500
-
-
-@bp.route("/ban", methods=["POST"])
-@require_internal_token
-@require_valid_session
-def ban():
-    pass
