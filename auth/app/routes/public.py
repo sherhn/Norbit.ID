@@ -1,6 +1,8 @@
 import re
 from datetime import datetime, timedelta
 from functools import wraps
+
+import jwt
 from email_validator import validate_email, EmailNotValidError
 from flask import Blueprint, request, current_app, jsonify, make_response, g
 from ..limiter import limiter
@@ -896,7 +898,104 @@ def delete():
 @bp.route("/refresh", methods=["POST"])
 @limiter.limit("10 per minute, 30 per hour")
 def refresh():
-    pass
+    """Обновление access_token с использованием refresh_token"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"message": "No data provided"}), 400
+
+        refresh_token = data.get("refresh_token")
+        if not refresh_token:
+            return jsonify({"message": "Missing refresh_token"}), 400
+
+        # Декодируем refresh_token
+        try:
+            payload = jwt.decode(
+                refresh_token,
+                current_app.config['JWT_SECRET_KEY'],
+                algorithms=['HS256']
+            )
+        except jwt.ExpiredSignatureError:
+            current_app.logger.warning("Expired refresh token")
+            return jsonify({"message": "Refresh token expired"}), 401
+        except jwt.InvalidTokenError:
+            current_app.logger.warning("Invalid refresh token")
+            return jsonify({"message": "Invalid refresh token"}), 401
+
+        account_id = payload.get('account_id')
+        session_id = payload.get('session_id')
+
+        if not account_id or not session_id:
+            current_app.logger.warning("Invalid token payload")
+            return jsonify({"message": "Invalid token payload"}), 401
+
+        # Находим сессию
+        session = UserSession.query.filter_by(
+            session_id=session_id,
+            account_id=account_id,
+            is_active=True
+        ).first()
+
+        if not session:
+            current_app.logger.warning(f"Session not found: {session_id[:10]}...")
+            return jsonify({"message": "Session not found"}), 401
+
+        # Проверяем срок действия сессии
+        if datetime.now() > session.expires_at:
+            current_app.logger.warning(f"Session expired: {session_id[:10]}...")
+            return jsonify({"message": "Session expired"}), 401
+
+        # Проверяем хеш refresh_token
+        if hash_string(refresh_token) != session.refresh_token_hash:
+            current_app.logger.warning(f"Invalid refresh token hash for session: {session_id[:10]}...")
+            return jsonify({"message": "Invalid refresh token"}), 401
+
+        # Находим аккаунт
+        account = session.account
+        if not account:
+            current_app.logger.warning(f"Account not found for session: {session_id[:10]}...")
+            return jsonify({"message": "Account not found"}), 404
+
+        # Генерируем новый access_token
+        access_payload = {
+            'account_id': account.id,
+            'public_id': account.public_id,
+            'session_id': session_id,
+            'iat': datetime.now(),
+            'exp': datetime.now() + timedelta(seconds=current_app.config['JWT_ACCESS_TOKEN_EXPIRES'])
+        }
+        new_access_token = jwt.encode(
+            access_payload,
+            current_app.config['JWT_SECRET_KEY'],
+            algorithm='HS256'
+        )
+
+        expires_in = current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
+
+        # Обновляем last_used
+        session.last_used = datetime.now()
+        db.session.commit()
+
+        current_app.logger.info(f"Access token refreshed for session: {session_id[:10]}...")
+
+        # Создаем ответ
+        response = make_response(jsonify({
+            "message": "Token refreshed",
+            "access_token": new_access_token,
+            "expires_in": expires_in
+        }), 200)
+
+        # Если есть куки с сессией и session_id совпадает, обновляем куки
+        cookie_data = get_session_from_cookie(request)
+        if cookie_data and cookie_data['session_id'] == session_id:
+            set_session_cookie(response, session_id, new_access_token)
+            current_app.logger.info(f"Session cookie updated for: {session_id[:10]}...")
+
+        return response
+
+    except Exception as e:
+        current_app.logger.error(f"Error in refresh: {e}", exc_info=True)
+        return jsonify({"message": "Internal error"}), 500
 
 
 @bp.route('/health')
