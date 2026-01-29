@@ -5,6 +5,32 @@ from ..utils import get_account_by_public_id, is_session_valid, validate_service
 bp = Blueprint('internal', __name__)
 
 
+def require_internal_api_key(f):
+    """
+    Декоратор для проверки валидности внутреннего API ключа.
+    Ожидает ключ в заголовке X-Internal-API-Key.
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Получаем API ключ из заголовка
+        api_key = request.headers.get('X-API-Key')
+
+        if not api_key:
+            current_app.logger.warning(f"Missing internal API key from {request.remote_addr}")
+            return jsonify({"error": "Internal API key required"}), 401
+
+        # Проверяем ключ
+        if api_key != current_app.config['INTERNAL_API_KEY']:
+            current_app.logger.warning(f"Invalid internal API key from {request.remote_addr}")
+            return jsonify({"error": "Invalid internal API key"}), 401
+
+        current_app.logger.info(f"Internal API key validated")
+        return f(*args, **kwargs)
+
+    return decorated
+
+
 def require_internal_token(f):
     """
     Декоратор для проверки валидности токена сервиса.
@@ -92,6 +118,7 @@ def require_valid_session(f):
 
 
 @bp.route("/get-service-token", methods=["POST"])
+@require_internal_api_key
 def get_service_token():
     """
     Получение токена для сервиса.

@@ -123,16 +123,18 @@ def validate_service_token(token: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"Service token not found or inactive")
             return None
 
+        now = datetime.now()
+
         # Проверяем срок действия
-        if datetime.now() > service_token.expires_at:
-            # Помечаем как неактивный
-            service_token.is_active = False
+        if now > service_token.expires_at:
+            # Удаляем просроченный токен из БД
+            db.session.delete(service_token)
             db.session.commit()
-            logger.info(f"Service token expired for service: {service_token.service_name}")
+            logger.info(f"Expired service token deleted for service: {service_token.service_name}")
             return None
 
         # Обновляем время последнего использования
-        service_token.last_used = datetime.now()
+        service_token.last_used = now
         db.session.commit()
 
         logger.debug(f"Service token validated for: {service_token.service_name}")
@@ -148,6 +150,7 @@ def validate_service_token(token: str) -> Optional[Dict[str, Any]]:
 
     except Exception as e:
         logger.error(f"Error validating service token: {e}")
+        db.session.rollback()
         return None
 
 
