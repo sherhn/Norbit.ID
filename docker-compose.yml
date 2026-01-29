@@ -27,10 +27,6 @@ services:
     <<: *common-variables
     container_name: auth_service
     restart: unless-stopped
-
-    # УБРАТЬ ПОРТ
-    ports:
-      - "5000:5000"
     depends_on:
       db:
         condition: service_healthy
@@ -148,8 +144,6 @@ services:
     image: redislabs/redisinsight:latest
     container_name: redisinsight
     restart: unless-stopped
-    ports:
-      - "5540:5540"
     volumes:
       - redisinsight_data:/db
     depends_on:
@@ -172,8 +166,6 @@ services:
       - PGADMIN_DEFAULT_PASSWORD=password
       - PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION=True
       - PGADMIN_CONFIG_SERVER_MODE=True
-    ports:
-      - "8080:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
