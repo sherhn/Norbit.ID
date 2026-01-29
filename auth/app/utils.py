@@ -12,6 +12,7 @@ from flask import current_app
 from .models import Account, ServiceToken, db
 import jwt
 import hashlib
+import pyotp
 
 logger = logging.getLogger(__name__)
 
@@ -882,3 +883,263 @@ def clear_session_cookie(response):
     response.set_cookie(**cookie_kwargs)
 
     current_app.logger.info(f"Session cookie cleared: {cookie_name}")
+
+
+def delete_account_from_db(account_id: int) -> bool:
+    """
+    Полное удаление аккаунта из БД.
+
+    Args:
+        account_id: ID аккаунта для удаления
+
+    Returns:
+        True если удалено, иначе False
+    """
+    try:
+        from .models import Account, UserSession, ServiceToken, db
+
+        # Находим аккаунт
+        account = Account.query.get(account_id)
+        if not account:
+            logger.warning(f"Account not found for deletion: {account_id}")
+            return False
+
+        # Удаляем все сессии аккаунта
+        UserSession.query.filter_by(account_id=account_id).delete()
+
+        # Полностью удаляем аккаунт
+        db.session.delete(account)
+        db.session.commit()
+
+        logger.info(f"Account deleted: {account_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting account {account_id}: {e}", exc_info=True)
+        db.session.rollback()
+        return False
+
+
+def issue_session_for_account(account: Account, user_agent: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Выдача сессии для аккаунта (аналогично логину, ибо лень переписывать).
+
+    Args:
+        account: Объект аккаунта
+        user_agent: User-Agent браузера
+
+    Returns:
+        Словарь с данными сессии или None при ошибке
+    """
+    try:
+        # Создаем сессию без токенов
+        session_info = create_user_session(
+            account_id=account.id,
+            refresh_token="",  # Временное значение
+            user_agent=user_agent
+        )
+
+        if not session_info:
+            logger.error(f"Failed to create session for account: {account.id}")
+            return None
+
+        # Создаем JWT токены с session_id
+        tokens = create_jwt_tokens(
+            account_id=account.id,
+            public_id=account.public_id,
+            session_id=session_info['session_id']
+        )
+
+        # Обновляем refresh_token_hash в сессии
+        from .models import UserSession, db
+        session = UserSession.query.filter_by(session_id=session_info['session_id']).first()
+        if session:
+            session.refresh_token_hash = hash_string(tokens['refresh_token'])
+            db.session.commit()
+
+        logger.info(f"Session issued for account: {account.id}, session: {session_info['session_id'][:10]}...")
+
+        return {
+            'session_info': session_info,
+            'tokens': tokens,
+            'account': account
+        }
+
+    except Exception as e:
+        logger.error(f"Error issuing session for account {account.id}: {e}", exc_info=True)
+        return None
+
+
+def confirm_registration(account_id: int) -> Optional[Account]:
+    """
+    Подтверждение регистрации (изменение is_verified в БД).
+
+    Args:
+        account_id: ID аккаунта
+
+    Returns:
+        Обновленный объект аккаунта или None при ошибке
+    """
+    try:
+        from .models import Account, db
+
+        # Находим аккаунт
+        account = Account.query.get(account_id)
+        if not account:
+            logger.warning(f"Account not found for registration confirmation: {account_id}")
+            return None
+
+        # Устанавливаем is_verified = True
+        account.is_verified = True
+        db.session.commit()
+
+        logger.info(f"Registration confirmed for account: {account_id}")
+        return account
+
+    except Exception as e:
+        logger.error(f"Error confirming registration for account {account_id}: {e}", exc_info=True)
+        db.session.rollback()
+        return None
+
+
+def change_account_password(account_id: int, new_password: str) -> bool:
+    """
+    Изменение пароля аккаунта.
+
+    Args:
+        account_id: ID аккаунта
+        new_password: Новый пароль
+
+    Returns:
+        True если успешно, иначе False
+    """
+    try:
+        from .models import Account, db
+
+        # Находим аккаунт
+        account = Account.query.get(account_id)
+        if not account:
+            logger.warning(f"Account not found for password change: {account_id}")
+            return False
+
+        # Проверяем надежность нового пароля
+        is_valid, message = validate_password_strength(new_password)
+        if not is_valid:
+            logger.warning(f"Invalid new password for account {account_id}: {message}")
+            return False
+
+        # Устанавливаем новый пароль
+        account.set_password(new_password)
+
+        # Сбрасываем счетчик неудачных попыток
+        account.failed_login_attempts = 0
+        account.locked_until = None
+
+        db.session.commit()
+
+        logger.info(f"Password changed for account: {account_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error changing password for account {account_id}: {e}", exc_info=True)
+        db.session.rollback()
+        return False
+
+
+def verify_code_for_operation(account_id: int, code: str, operation: str) -> bool:
+    """
+    Проверка кода подтверждения для конкретной операции.
+
+    Args:
+        account_id: ID аккаунта
+        code: Введенный код
+        operation: Тип операции (registration, login, reset, delete)
+
+    Returns:
+        True если код верный, иначе False
+    """
+    try:
+        is_valid = verify_verification_code(
+            user_id=account_id,
+            code=code,
+            operation=operation,
+            increment_failed=True
+        )
+
+        if is_valid:
+            logger.info(f"Code verified for account {account_id}, operation: {operation}")
+        else:
+            logger.warning(f"Code verification failed for account {account_id}, operation: {operation}")
+
+        return is_valid
+
+    except Exception as e:
+        logger.error(f"Error verifying code for account {account_id}: {e}")
+        return False
+
+
+def handle_2fa_verification(account: Account, enable_2fa: bool = False) -> Dict[str, Any]:
+    """
+    Обработка 2FA верификации.
+
+    Args:
+        account: Объект аккаунта
+        enable_2fa: Если True - включить 2FA, если False - проверить 2FA
+
+    Returns:
+        Словарь с результатом
+    """
+    try:
+        from .models import db
+
+        result = {
+            'success': False,
+            'requires_session': False,
+            'session_data': None,
+            'message': ''
+        }
+
+        if enable_2fa:
+            # Включаем 2FA (но не выдаем сессию)
+            # Генерируем секрет для 2FA
+            secret = pyotp.random_base32()
+
+            account.two_factor_enabled = True
+            account.two_factor_secret = secret
+            db.session.commit()
+
+            result['success'] = True
+            result['message'] = 'Two-factor authentication enabled'
+            result['requires_session'] = False
+
+            logger.info(f"2FA enabled for account: {account.id}")
+
+        else:
+            # 2FA уже включен - выдаем сессию
+            # Получаем User-Agent
+            from flask import request
+            user_agent = request.headers.get('User-Agent', '')
+
+            # Выдаем сессию
+            session_data = issue_session_for_account(account, user_agent)
+            if session_data:
+                result['success'] = True
+                result['requires_session'] = True
+                result['session_data'] = session_data
+                result['message'] = 'Two-factor authentication successful'
+
+                logger.info(f"2FA verification successful for account: {account.id}")
+            else:
+                result['message'] = 'Failed to create session'
+                logger.error(f"Failed to create session after 2FA for account: {account.id}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error handling 2FA verification for account {account.id}: {e}", exc_info=True)
+        return {
+            'success': False,
+            'requires_session': False,
+            'session_data': None,
+            'message': str(e)
+        }

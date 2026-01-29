@@ -7,7 +7,9 @@ from ..limiter import limiter
 from ..models import db, Account, UserSession
 from ..utils import create_verification_code, validate_password_strength, send_verification_email, set_session_cookie, \
     create_user_session, create_jwt_tokens, is_session_valid, clear_session_cookie, delete_session_by_id, \
-    delete_all_sessions_by_account_id, get_session_account_id, get_session_from_cookie, hash_string
+    delete_all_sessions_by_account_id, get_session_account_id, get_session_from_cookie, hash_string, \
+    verify_code_for_operation, confirm_registration, issue_session_for_account, change_account_password, \
+    delete_verification_code, delete_account_from_db
 
 bp = Blueprint('public', __name__)
 
@@ -125,7 +127,7 @@ def registration():
             # Создаем и сохраняем код подтверждения в Redis
             verification_code = create_verification_code(
                 user_id=account.id,
-                operation='register',
+                operation='registration',
                 ttl_minutes=10
             )
 
@@ -134,7 +136,7 @@ def registration():
                 email_sent = send_verification_email(
                     email=email,
                     code=verification_code,
-                    operation='register'
+                    operation='registration'
                 )
 
                 if email_sent:
@@ -241,7 +243,7 @@ def login():
 
             verification_code = create_verification_code(
                 user_id=account.id,
-                operation='register',
+                operation='registration',
                 ttl_minutes=10
             )
 
@@ -249,7 +251,7 @@ def login():
                 email_sent = send_verification_email(
                     email=account.email,
                     code=verification_code,
-                    operation='register'
+                    operation='registration'
                 )
 
                 if email_sent:
@@ -376,7 +378,233 @@ def login():
 @bp.route("/verify", methods=["POST"])
 @limiter.limit("5 per 2 minutes, 20 per hour, 3 per minute")
 def verify():
-    pass
+    """Подтверждение операций (регистрация, сброс пароля, удаление аккаунта, 2FA)"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"message": "No data"}), 400
+
+        # Обязательные поля для всех операций
+        operation = data.get("operation")
+        code = data.get("code")
+
+        if not operation or not code:
+            return jsonify({"message": "Missing operation or code"}), 400
+
+        # Проверяем валидность операции
+        valid_operations = ['registration', 'login', 'reset', 'delete']
+        if operation not in valid_operations:
+            return jsonify({
+                "message": "Invalid operation",
+                "detail": f"Valid operations: {', '.join(valid_operations)}"
+            }), 400
+
+        account = None
+        email = None
+
+        # Определяем источник информации об аккаунте в зависимости от операции
+        if operation in ['reset', 'delete']:
+            # Для reset и delete - используем сессионные куки
+            session_data = get_session_from_cookie(request)
+            if not session_data:
+                return jsonify({
+                    "message": "Session required",
+                    "detail": "Session cookie is required for this operation"
+                }), 401
+
+            # Проверяем сессию
+            if not is_session_valid(session_data['session_id'], session_data['access_token']):
+                return jsonify({
+                    "message": "Invalid session",
+                    "detail": "Session is invalid or expired"
+                }), 401
+
+            # Получаем account_id из сессии
+            account_id = get_session_account_id(session_data['session_id'])
+            if not account_id:
+                return jsonify({"message": "Account not found for session"}), 404
+
+            # Находим аккаунт
+            account = Account.query.get(account_id)
+            if not account:
+                return jsonify({"message": "Account not found"}), 404
+
+        else:
+            # Для registration и login - получаем email из JSON
+            email = data.get("email")
+            if not email:
+                return jsonify({"message": "Email is required for this operation"}), 400
+
+            # Находим аккаунт по email
+            account = Account.query.filter_by(email=email).first()
+            if not account:
+                # Для безопасности возвращаем общий ответ
+                current_app.logger.warning(f"Verify attempt for non-existent email: {email}")
+                return jsonify({"message": "Invalid verification code"}), 400
+
+        if not account:
+            return jsonify({"message": "Account not found"}), 404
+
+        # Проверяем код подтверждения
+        if not verify_code_for_operation(account.id, code, operation):
+            return jsonify({"message": "Invalid verification code"}), 400
+
+        current_app.logger.info(f"Code verified for account {account.id}, operation: {operation}")
+
+        # Выполняем соответствующую операцию
+        result = None
+
+        if operation == 'registration':
+            # Подтверждаем регистрацию
+            updated_account = confirm_registration(account.id)
+            if not updated_account:
+                return jsonify({"message": "Failed to confirm registration"}), 500
+
+            # Выдаем сессию
+            user_agent = request.headers.get('User-Agent', '')
+            session_data = issue_session_for_account(updated_account, user_agent)
+
+            if session_data:
+                # Создаем ответ и устанавливаем куки
+                response_data = {
+                    "message": "Registration confirmed successfully",
+                    "account": {
+                        "username": updated_account.username,
+                        "email": updated_account.email,
+                        "public_id": updated_account.public_id,
+                        "is_verified": updated_account.is_verified
+                    },
+                    "session": {
+                        "session_id": session_data['session_info']['session_id'],
+                        "created_at": session_data['session_info']['created_at'].isoformat(),
+                        "expires_at": session_data['session_info']['expires_at'].isoformat()
+                    },
+                    "tokens": {
+                        "access_token": session_data['tokens']['access_token'],
+                        "refresh_token": session_data['tokens']['refresh_token'],
+                        "access_expires_in": current_app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+                        "refresh_expires_in": current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+                    }
+                }
+
+                response = make_response(jsonify(response_data), 200)
+                set_session_cookie(response, session_data['session_info']['session_id'],
+                                   session_data['tokens']['access_token'])
+
+                current_app.logger.info(f"Registration confirmed and session created for: {updated_account.email}")
+                return response
+            else:
+                return jsonify({
+                    "message": "Registration confirmed but failed to create session",
+                    "detail": "Please login manually"
+                }), 201
+
+        elif operation == 'login':
+            # Обработка 2FA
+            # Определяем, нужно ли включить 2FA или проверить его
+            if not account.two_factor_enabled:
+                # Включаем 2FA (но не выдаем сессию)
+                from ..utils import handle_2fa_verification
+                twofa_result = handle_2fa_verification(account, enable_2fa=True)
+
+                if twofa_result['success']:
+                    return jsonify({
+                        "message": "Two-factor authentication enabled",
+                        "detail": "2FA has been enabled for your account. Please login again.",
+                        "two_factor_enabled": True
+                    }), 200
+                else:
+                    return jsonify({
+                        "message": "Failed to enable two-factor authentication",
+                        "detail": twofa_result['message']
+                    }), 500
+            else:
+                # 2FA уже включен - проверяем и выдаем сессию
+                from ..utils import handle_2fa_verification
+                twofa_result = handle_2fa_verification(account, enable_2fa=False)
+
+                if twofa_result['success'] and twofa_result['requires_session']:
+                    # Создаем ответ и устанавливаем куки
+                    response_data = {
+                        "message": "Two-factor authentication successful",
+                        "account": {
+                            "username": account.username,
+                            "email": account.email,
+                            "public_id": account.public_id,
+                            "is_verified": account.is_verified,
+                            "two_factor_enabled": account.two_factor_enabled
+                        },
+                        "session": {
+                            "session_id": twofa_result['session_data']['session_info']['session_id'],
+                            "created_at": twofa_result['session_data']['session_info']['created_at'].isoformat(),
+                            "expires_at": twofa_result['session_data']['session_info']['expires_at'].isoformat()
+                        },
+                        "tokens": {
+                            "access_token": twofa_result['session_data']['tokens']['access_token'],
+                            "refresh_token": twofa_result['session_data']['tokens']['refresh_token'],
+                            "access_expires_in": current_app.config['JWT_ACCESS_TOKEN_EXPIRES'],
+                            "refresh_expires_in": current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+                        }
+                    }
+
+                    response = make_response(jsonify(response_data), 200)
+                    set_session_cookie(response,
+                                       twofa_result['session_data']['session_info']['session_id'],
+                                       twofa_result['session_data']['tokens']['access_token'])
+
+                    current_app.logger.info(f"2FA login successful for: {account.email}")
+                    return response
+                else:
+                    return jsonify({
+                        "message": "Two-factor authentication failed",
+                        "detail": twofa_result['message']
+                    }), 401
+
+        elif operation == 'reset':
+            # Изменение пароля
+            new_password = data.get("new_password")
+            if not new_password:
+                return jsonify({"message": "New password is required"}), 400
+
+            # Проверяем надежность пароля
+            is_valid, message = validate_password_strength(new_password)
+            if not is_valid:
+                return jsonify({"message": message}), 400
+
+            # Изменяем пароль
+            if change_account_password(account.id, new_password):
+                # Удаляем код подтверждения (после успешного использования)
+                delete_verification_code(account.id, 'reset')
+
+                current_app.logger.info(f"Password reset successful for: {account.email}")
+                return jsonify({
+                    "message": "Password reset successful",
+                    "detail": "You can now login with your new password"
+                }), 200
+            else:
+                return jsonify({"message": "Failed to reset password"}), 500
+
+        elif operation == 'delete':
+            # Удаление аккаунта
+            if delete_account_from_db(account.id):
+                # Очищаем куки
+                response = make_response(jsonify({
+                    "message": "Account deleted successfully",
+                    "detail": "Your account has been permanently deleted"
+                }), 200)
+
+                clear_session_cookie(response)
+
+                current_app.logger.info(f"Account deleted: {account.email}")
+                return response
+            else:
+                return jsonify({"message": "Failed to delete account"}), 500
+
+        return jsonify({"message": "Unknown operation"}), 400
+
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error in verify: {e}", exc_info=True)
+        return jsonify({"message": "Internal error"}), 500
 
 
 @bp.route("/2fa", methods=["POST"])
@@ -567,6 +795,13 @@ def reset():
             return jsonify({
                 "message": "If an account exists with this email, a verification code has been sent"
             }), 200
+
+        # Проверяем, что аккаунт верифицирован
+        if not account.is_verified:
+            return jsonify({
+                "message": "Account not verified",
+                "detail": "Please verify your account first"
+            }), 403
 
         # Создаем и отправляем код подтверждения с типом операции 'reset'
         verification_code = create_verification_code(
