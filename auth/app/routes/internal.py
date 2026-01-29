@@ -1,6 +1,8 @@
 from functools import wraps
 from flask import Blueprint, request, current_app, jsonify, g
-from ..utils import get_account_by_public_id, is_session_valid, validate_service_token
+from ..utils import is_session_valid, validate_service_token, \
+    delete_session_by_id, delete_all_sessions_by_account_id, get_session_account_id
+from ..models import UserSession, db
 
 bp = Blueprint('internal', __name__)
 
@@ -209,65 +211,269 @@ def validate_session():
 @require_internal_token
 @require_valid_session
 def get_account_info():
-    """Получение информации об аккаунте по public_id или email"""
+    """Получение информации об аккаунте пользователя по текущей сессии"""
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
+        # Получаем данные сессии из контекста (уже проверено декоратором)
+        session_id = g.session_data['session_id']
 
-        public_id = data.get('public_id')
-        email = data.get('email')
+        # Получаем account_id по session_id
+        account_id = get_session_account_id(session_id)
 
-        # Поиск
-        account_info = get_account_by_public_id(public_id=public_id, email=email)
-
-        if account_info:
+        if not account_id:
             return jsonify({
-                "success": True,
-                "account": account_info,
+                "error": "Account not found for session",
                 "session_valid": True
-            }), 200
-        else:
+            }), 404
+
+        # Находим аккаунт по ID
+        from ..models import Account
+        account = Account.query.get(account_id)
+
+        if not account:
             return jsonify({
-                "success": False,
                 "error": "Account not found",
                 "session_valid": True
             }), 404
 
-    except ValueError as e:
-        # Ловим ошибку, если не переданы оба параметра
-        return jsonify({"error": str(e), "session_valid": True}), 400
+        # Формируем информацию об аккаунте
+        account_info = {
+            'id': account.id,
+            'username': account.username,
+            'email': account.email,
+            'is_verified': account.is_verified,
+            'created_at': account.created_at.isoformat() if account.created_at else None,
+            'public_id': account.public_id,
+            'two_factor_enabled': account.two_factor_enabled,
+            'failed_login_attempts': account.failed_login_attempts,
+            'locked_until': account.locked_until.isoformat() if account.locked_until else None,
+            'last_failed_login': account.last_failed_login.isoformat() if account.last_failed_login else None
+        }
+
+        current_app.logger.info(f"Account info retrieved for session: {session_id[:10]}...")
+
+        return jsonify({
+            "success": True,
+            "account": account_info,
+            "session_id": session_id,
+            "session_valid": True
+        }), 200
+
     except Exception as e:
         current_app.logger.error(f"Error in get_account_info: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error", "session_valid": True}), 500
+        return jsonify({
+            "error": "Internal server error",
+            "session_valid": True
+        }), 500
 
 
 @bp.route("/get-session-info", methods=["POST"])
 @require_internal_token
 @require_valid_session
 def get_session_info():
-    pass
+    """Получение информации о текущей сессии"""
+    try:
+        # Получаем данные сессии из контекста
+        session_id = g.session_data['session_id']
+
+        # Находим сессию в БД
+        session = UserSession.query.filter_by(session_id=session_id).first()
+
+        if not session:
+            return jsonify({
+                "error": "Session not found in database",
+                "session_valid": False
+            }), 404
+
+        # Получаем информацию об аккаунте
+        account_info = None
+        if session.account:
+            account_info = {
+                'id': session.account.id,
+                'username': session.account.username,
+                'email': session.account.email,
+                'public_id': session.account.public_id,
+                'is_verified': session.account.is_verified
+            }
+
+        # Формируем информацию о сессии
+        session_info = {
+            'session_id': session.session_id,
+            'account_id': session.account_id,
+            'created_at': session.created_at.isoformat() if session.created_at else None,
+            'last_used': session.last_used.isoformat() if session.last_used else None,
+            'expires_at': session.expires_at.isoformat() if session.expires_at else None,
+            'is_active': session.is_active,
+            'user_agent': session.user_agent_original,
+            'account': account_info
+        }
+
+        current_app.logger.info(f"Session info retrieved for: {session_id[:10]}...")
+
+        return jsonify({
+            "success": True,
+            "session": session_info,
+            "session_valid": True
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error in get_session_info: {e}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error",
+            "session_valid": True
+        }), 500
 
 
 @bp.route("/get-all-session-info", methods=["POST"])
 @require_internal_token
 @require_valid_session
 def get_all_session_info():
-    pass
+    """Получение информации о всех активных сессиях пользователя"""
+    try:
+        # Получаем данные сессии из контекста
+        session_id = g.session_data['session_id']
+
+        # Получаем account_id по session_id
+        account_id = get_session_account_id(session_id)
+
+        if not account_id:
+            return jsonify({
+                "error": "Account not found for session",
+                "session_valid": True
+            }), 404
+
+        # Находим все активные сессии аккаунта
+        sessions = UserSession.query.filter_by(
+            account_id=account_id,
+            is_active=True
+        ).order_by(UserSession.created_at.desc()).all()
+
+        # Формируем список информации о сессиях
+        sessions_info = []
+        for session in sessions:
+            session_info = {
+                'session_id': session.session_id,
+                'created_at': session.created_at.isoformat() if session.created_at else None,
+                'last_used': session.last_used.isoformat() if session.last_used else None,
+                'expires_at': session.expires_at.isoformat() if session.expires_at else None,
+                'user_agent': session.user_agent_original,
+                'is_current': session.session_id == session_id  # Отмечаем текущую сессию
+            }
+            sessions_info.append(session_info)
+
+        # Получаем информацию об аккаунте
+        from ..models import Account
+        account = Account.query.get(account_id)
+        account_info = None
+        if account:
+            account_info = {
+                'id': account.id,
+                'username': account.username,
+                'email': account.email,
+                'public_id': account.public_id,
+                'total_active_sessions': len(sessions)
+            }
+
+        current_app.logger.info(f"All session info retrieved for account: {account_id}")
+
+        return jsonify({
+            "success": True,
+            "account": account_info,
+            "sessions": sessions_info,
+            "total_sessions": len(sessions_info),
+            "session_valid": True
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error in get_all_session_info: {e}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error",
+            "session_valid": True
+        }), 500
 
 
 @bp.route("/logout", methods=["POST"])
 @require_internal_token
 @require_valid_session
 def logout():
-    pass
+    """Выход из текущей сессии (удаление сессии из БД)"""
+    try:
+        # Получаем данные сессии из контекста
+        session_id = g.session_data['session_id']
+
+        # Удаляем сессию из БД
+        deleted = delete_session_by_id(session_id)
+
+        if deleted:
+            current_app.logger.info(f"Session {session_id[:10]}... deleted via internal API")
+            return jsonify({
+                "success": True,
+                "message": "Session terminated successfully",
+                "session_id": session_id,
+                "deleted": True
+            }), 200
+        else:
+            current_app.logger.warning(f"Session {session_id[:10]}... not found for deletion")
+            return jsonify({
+                "success": False,
+                "message": "Session not found",
+                "session_id": session_id,
+                "deleted": False,
+                "session_valid": True
+            }), 404
+
+    except Exception as e:
+        current_app.logger.error(f"Error in logout: {e}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error",
+            "session_valid": True
+        }), 500
 
 
 @bp.route("/logout-all", methods=["POST"])
 @require_internal_token
 @require_valid_session
 def logout_all():
-    pass
+    """Выход из всех сессий пользователя (удаление всех сессий из БД)"""
+    try:
+        # Получаем данные сессии из контекста
+        session_id = g.session_data['session_id']
+
+        # Получаем account_id по session_id
+        account_id = get_session_account_id(session_id)
+
+        if not account_id:
+            return jsonify({
+                "error": "Account not found for session",
+                "session_valid": True
+            }), 404
+
+        # Удаляем все сессии аккаунта из БД
+        deleted = delete_all_sessions_by_account_id(account_id)
+
+        if deleted:
+            current_app.logger.info(f"All sessions deleted for account: {account_id} via internal API")
+            return jsonify({
+                "success": True,
+                "message": "All sessions terminated successfully",
+                "account_id": account_id,
+                "deleted": True
+            }), 200
+        else:
+            current_app.logger.warning(f"No sessions found for account: {account_id}")
+            return jsonify({
+                "success": False,
+                "message": "No sessions found for account",
+                "account_id": account_id,
+                "deleted": False,
+                "session_valid": True
+            }), 404
+
+    except Exception as e:
+        current_app.logger.error(f"Error in logout-all: {e}", exc_info=True)
+        return jsonify({
+            "error": "Internal server error",
+            "session_valid": True
+        }), 500
 
 
 @bp.route("/ban", methods=["POST"])
