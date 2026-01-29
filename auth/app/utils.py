@@ -60,7 +60,7 @@ def create_service_token(service_name: str, description: str = None) -> Optional
     try:
         from flask import current_app
 
-        valid_days = int(current_app.config.get('SERVICE_TOKEN_EXPIRES_DAYS', 180))
+        valid_hours = int(current_app.config.get('SERVICE_TOKEN_EXPIRES_HOURS', 1))
 
         # Генерируем токен
         token = generate_service_token()
@@ -68,7 +68,7 @@ def create_service_token(service_name: str, description: str = None) -> Optional
 
         # Рассчитываем срок действия
         created_at = datetime.now()
-        expires_at = created_at + timedelta(days=valid_days)
+        expires_at = created_at + timedelta(hours=valid_hours)
 
         # Создаем запись в БД
         service_token = ServiceToken(
@@ -90,7 +90,7 @@ def create_service_token(service_name: str, description: str = None) -> Optional
             'service_name': service_name,
             'created_at': created_at.isoformat(),
             'expires_at': expires_at.isoformat(),
-            'valid_days': valid_days
+            'valid_hours': valid_hours
         }
 
     except Exception as e:

@@ -155,7 +155,7 @@ def get_service_token():
             "token": token_info['token'],
             "service_name": token_info['service_name'],
             "expires_at": token_info['expires_at'],
-            "valid_days": token_info['valid_days'],
+            "valid_hours": token_info['valid_hours'],
             "warning": "Save this token securely. It will not be shown again."
         }), 200
 
