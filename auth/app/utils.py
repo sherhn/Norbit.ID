@@ -448,62 +448,6 @@ def send_verification_email(email: str, code: str, operation: str) -> bool:
         return False
 
 
-def get_account_by_public_id(public_id: str = None, email: str = None) -> Optional[Dict[str, Any]]:
-    """
-    Получение информации об аккаунте по public_id или email.
-
-    Args:
-        public_id: Публичный идентификатор аккаунта
-        email: Email аккаунта
-
-    Returns:
-        Словарь с информацией об аккаунте или None если аккаунт не найден
-
-    Raises:
-        ValueError: Если не передан ни public_id, ни email
-    """
-    if not public_id and not email:
-        raise ValueError("Either public_id or email must be provided")
-
-    try:
-        account = None
-
-        # Ищем по public_id (приоритет ибо четко)
-        if public_id:
-            account = Account.query.filter_by(public_id=public_id).first()
-            logger.info(f"Searching account by public_id: {public_id}")
-
-        # Если не нашли по public_id или public_id не передан, ищем по email
-        if not account and email:
-            account = Account.query.filter_by(email=email).first()
-            logger.info(f"Searching account by email: {email}")
-
-        if not account:
-            logger.warning(f"Account not found. public_id: {public_id}, email: {email}")
-            return None
-
-        # Формируем безопасный словарь с информацией (без пароля и других чувствительных данных)
-        account_info = {
-            'id': account.id,
-            'username': account.username,
-            'email': account.email,
-            'is_verified': account.is_verified,
-            'created_at': account.created_at.isoformat() if account.created_at else None,
-            'public_id': account.public_id,
-            'two_factor_enabled': account.two_factor_enabled,
-            'failed_login_attempts': account.failed_login_attempts,
-            'locked_until': account.locked_until.isoformat() if account.locked_until else None,
-            'last_failed_login': account.last_failed_login.isoformat() if account.last_failed_login else None
-        }
-
-        logger.info(f"Account info retrieved. public_id: {account.public_id}, email: {account.email}")
-        return account_info
-
-    except Exception as e:
-        logger.error(f"Error retrieving account. public_id: {public_id}, email: {email}: {e}", exc_info=True)
-        return None
-
-
 def create_jwt_tokens(account_id: int, public_id: str, session_id: str = None) -> Dict[str, str]:
     """
     Создание JWT токенов (access и refresh).
