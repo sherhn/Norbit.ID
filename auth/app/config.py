@@ -20,7 +20,7 @@ class Config:
 
     # Настройки сессий
     MAX_SESSIONS_PER_USER = int(os.environ.get('MAX_SESSIONS_PER_USER', 10))
-    SESSION_COOKIE_NAME = 'session_token'
+    SESSION_COOKIE_NAME = 'norbit.id'
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'True').lower() == 'true'
     SESSION_COOKIE_SAMESITE = 'Lax'  # Для кросс-доменных запросов
